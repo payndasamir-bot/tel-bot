@@ -1,0 +1,31 @@
+name: FF → Telegram alerts (every 15m)
+permissions: { contents: write }
+on:
+  schedule: [{ cron: '*/15 * * * *' }]
+  workflow_dispatch: {}
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: true }
+      - uses: actions/setup-python@v4
+        with: { python-version: '3.11' }
+      - run: python -m pip install --upgrade pip && pip install requests pytz
+      - run: |
+          mkdir -p data
+          [ -f data/seen.json ] || echo "[]" > data/seen.json
+      - name: Run notifier
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python scripts/notify.py
+      - name: Commit seen.json if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ -n "$(git status --porcelain data/seen.json)" ]; then
+            git add data/seen.json
+            git commit -m "Update seen events"
+            git push
+          fi
