@@ -1,0 +1,56 @@
+name: Daily Fundamental Summary
+
+on:
+  schedule:
+    # Každý den v 08:00 Europe/Prague (06:00 UTC)
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+    inputs:
+      pairs:
+        description: "Seznam párů oddělený čárkou (např. EURUSD,USDJPY)"
+        required: false
+        default: "EURUSD,USDJPY"
+
+jobs:
+  run-summary:
+    runs-on: ubuntu-latest
+    env:
+      PAIRS: ${{ inputs.pairs != '' && inputs.pairs || 'EURUSD,USDJPY' }}
+      TZ: Europe/Prague
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        if: hashFiles('requirements.txt') != ''
+        run: pip install -r requirements.txt
+
+      - name: Skip on weekend
+        run: |
+          dow=$(date +%u)
+          if [ "$dow" -ge 6 ]; then
+            echo "Víkend – workflow se přeskočí."
+            exit 0
+          fi
+
+      - name: Run daily summary
+        shell: bash
+        run: |
+          echo "Cílové páry: $PAIRS"
+          set +e
+          python scripts/daily_summary.py --pairs "$PAIRS"
+          code=$?
+          if [ $code -eq 2 ]; then
+            echo "Žádná data – beru jako OK."
+            exit 0
+          elif [ $code -ne 0 ]; then
+            echo "Skript spadl s kódem: $code"
+            exit $code
+          fi
+          echo "Hotovo."
