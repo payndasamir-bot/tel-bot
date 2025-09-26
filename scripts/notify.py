@@ -1,72 +1,103 @@
-#!/usr/bin/env python3
-# FF weekly JSON -> Telegram; posílá jen události s actual + High/Medium impact.
-import requests, os, json, sys
-from datetime import datetime, timezone
-import pytz
+import requests
+from bs4 import BeautifulSoup
+import datetime
+import os
+import json
 
-FF_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
-SEEN_FILE = "data/seen.json"
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+# Načtení proměnných z GitHub Secrets
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-if not BOT_TOKEN or not CHAT_ID:
-    print("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID", file=sys.stderr); sys.exit(1)
+
+# Soubor, kde sledujeme už odeslané události
+SEEN_FILE = "seen.json"
+
+def send_telegram_message(text: str):
+    """Pošle zprávu do Telegramu."""
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"}
+    try:
+        requests.post(url, data=payload)
+    except Exception as e:
+        print("Error sending message:", e)
 
 def load_seen():
-    try:
-        with open(SEEN_FILE,"r",encoding="utf-8") as f: return set(json.load(f))
-    except Exception: return set()
+    if os.path.exists(SEEN_FILE):
+        with open(SEEN_FILE, "r") as f:
+            return json.load(f)
+    return []
 
-def save_seen(s):
-    with open(SEEN_FILE,"w",encoding="utf-8") as f: json.dump(sorted(list(s)), f, ensure_ascii=False, indent=2)
+def save_seen(seen):
+    with open(SEEN_FILE, "w") as f:
+        json.dump(seen, f)
 
-def uid(e):
-    return f"{e.get('date','')}|{e.get('time','')}|{e.get('country','')}|{e.get('title','')}"
+def fetch_calendar(day="today"):
+    """Stáhne kalendář z ForexFactory pro today nebo tomorrow."""
+    url = f"https://www.forexfactory.com/calendar?day={day}"
+    response = requests.get(url)
+    soup = BeautifulSoup(response.text, "html.parser")
+    rows = soup.select("tr.calendar__row")
+    events = []
+    for row in rows:
+        time = row.select_one(".calendar__time")
+        currency = row.select_one(".calendar__currency")
+        impact = row.select_one(".impact")
+        event = row.select_one(".calendar__event")
+        actual = row.select_one(".calendar__actual")
+        forecast = row.select_one(".calendar__forecast")
+        previous = row.select_one(".calendar__previous")
 
-def num(x):
-    if x is None: return None
-    try: return float(str(x).replace("%","").replace(",",".").strip())
-    except: return None
+        if event:
+            events.append({
+                "time": time.get_text(strip=True) if time else "",
+                "currency": currency.get_text(strip=True) if currency else "",
+                "impact": impact.get("title") if impact else "",
+                "event": event.get_text(strip=True),
+                "actual": actual.get_text(strip=True) if actual else "",
+                "forecast": forecast.get_text(strip=True) if forecast else "",
+                "previous": previous.get_text(strip=True) if previous else "",
+            })
+    return events
 
-def fmt(ts):
-    if ts is None: return "?"
-    try:
-        if isinstance(ts,(int,float)): dt = datetime.fromtimestamp(int(ts), tz=timezone.utc)
-        else: dt = datetime.fromisoformat(str(ts))
-        return dt.astimezone(pytz.timezone("Europe/Prague")).strftime("%Y-%m-%d %H:%M")
-    except: return str(ts)
-
-def send(text):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    r = requests.post(url, data={"chat_id": CHAT_ID, "text": text, "parse_mode":"HTML"}, timeout=15)
-    if r.status_code >= 300: print("Telegram send failed:", r.text, file=sys.stderr)
+def analyze_event(ev):
+    """Základní komentář podle typu události."""
+    text = ""
+    if "CPI" in ev["event"] or "Inflation" in ev["event"]:
+        text = "📊 Inflace: vyšší než očekávání = silnější měna, slabší zlato."
+    elif "GDP" in ev["event"]:
+        text = "📈 HDP: vyšší než očekávání = silnější měna."
+    elif "Unemployment" in ev["event"] or "Labor" in ev["event"]:
+        text = "👷‍♂️ Trh práce: nižší nezaměstnanost = silnější měna."
+    elif "Retail" in ev["event"]:
+        text = "🛍️ Maloobchodní tržby: vyšší spotřeba = růst měny."
+    return text
 
 def main():
+    today = datetime.date.today().strftime("%Y-%m-%d")
     seen = load_seen()
-    events = requests.get(FF_URL, timeout=20).json()
-    new_seen, sent = set(seen), 0
-    for e in events:
-        impact = (e.get("impact") or "").lower()
-        if "high" not in impact and "medium" not in impact: continue
-        uid_ = uid(e)
-        if uid_ in seen: continue
-        actual = e.get("actual")
-        if not actual: continue  # posíláme až po vyhlášení
-        title, country = e.get("title","UNKNOWN"), e.get("country","")
-        t = fmt(e.get("timestamp") or e.get("date") or e.get("time"))
-        forecast = e.get("forecast") or e.get("consensus") or ""
-        previous = e.get("previous") or ""
-        txt = f"⚠️ <b>{country} {title}</b> ({e.get('impact','')})\n⏱️ {t}\nActual: {actual} | Forecast: {forecast}"
-        if previous: txt += f" | Prev: {previous}"
-        an, fo = num(actual), num(forecast)
-        if an is not None and fo is not None:
-            if an > fo: txt += "\n→ Krátce: Vyšší než očekávání — býčí pro měnu / tlak na sazby."
-            elif an < fo: txt += "\n→ Krátce: Nižší než očekávání — slabší pro měnu."
-            else: txt += "\n→ Krátce: V souladu s očekáváním."
-        else:
-            txt += "\n→ Krátce: Nový údaj — zkontroluj detaily."
-        send(txt); new_seen.add(uid_); sent += 1
-    print(f"Sent {sent} messages." if sent else "No new releases with actual to send.")
-    save_seen(new_seen)
+
+    # Dnešní události
+    events = fetch_calendar("today")
+    for ev in events:
+        if ev["actual"] and ev["event"] not in seen:
+            msg = f"📢 <b>{ev['currency']}</b> {ev['event']}\n" \
+                  f"🕒 {ev['time']}\n" \
+                  f"Actual: {ev['actual']} | Forecast: {ev['forecast']} | Previous: {ev['previous']}\n" \
+                  f"{analyze_event(ev)}"
+            send_telegram_message(msg)
+            seen.append(ev["event"])
+
+    save_seen(seen)
+
+    # Večer pošleme zítřejší přehled
+    now = datetime.datetime.now().strftime("%H:%M")
+    if now >= "20:00":
+        tomorrow_events = fetch_calendar("tomorrow")
+        if tomorrow_events:
+            msg = "📅 <b>Zítřejší události:</b>\n"
+            for ev in tomorrow_events:
+                msg += f"- {ev['time']} {ev['currency']} {ev['event']} (Forecast: {ev['forecast']})\n"
+            send_telegram_message(msg)
 
 if __name__ == "__main__":
     main()
+
