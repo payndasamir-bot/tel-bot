@@ -5,7 +5,8 @@ import os
 import json
 
 # Načtení proměnných z GitHub Secrets
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 # Soubor, kde sledujeme už odeslané události
