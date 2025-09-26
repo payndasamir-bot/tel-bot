@@ -1,0 +1,18 @@
+name: Daily next-day summary (22:00 CET)
+on:
+  schedule:
+    - cron: '0 20 * * *'   # 20:00 UTC ~ 22:00 CET/CEST
+  workflow_dispatch: {}
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v4
+        with: { python-version: '3.11' }
+      - run: python -m pip install --upgrade pip && pip install requests pytz
+      - name: Send summary
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python scripts/nextday_summary.py
