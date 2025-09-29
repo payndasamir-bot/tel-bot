@@ -43,32 +43,19 @@ jobs:
             exit 0
           fi
 
-      - name: Run daily summary
-        id: runpy
-        shell: bash
-        run: |
-          echo "Cílové páry: $PAIRS"
-          set +e
-          python scripts/nextday_summary.py --pairs "$PAIRS"
-          code=$?
-          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
-          if [ $code -eq 2 ]; then
-            echo "Žádná data – beru jako OK."
-            exit 0
-          elif [ $code -ne 0 ]; then
-            echo "Skript spadl s kódem: $code"
-            exit $code
-          fi
-          echo "Hotovo."
-
       - name: Notify Telegram
         if: always()
+        shell: bash
         run: |
           code="${{ steps.runpy.outputs.exit_code }}"
-          if [ "$code" = "2" ]; then
-            python scripts/notify.py "✅ Daily summary proběhlo: <b>bez nových dat</b>. Páry: <code>$PAIRS</code>"
-          elif [ "$code" = "0" ]; then
-            python scripts/notify.py "✅ Daily summary <b>hotovo</b>. Páry: <code>$PAIRS</code>"
-          else
-            python scripts/notify.py "❌ Daily summary selhalo (exit $code). Páry: <code>$PAIRS</code>"
+          # default message (error)
+          msg="❌ Daily summary selhalo (exit $code). Páry: <code>$PAIRS</code>"
+          # přepiš podle exit kódu
+          if [ "$code" = "2" ]; then msg="✅ Daily summary proběhlo: <b>bez nových dat</b>. Páry: <code>$PAIRS</code>"; fi
+          if [ "$code" = "0" ]; then msg="✅ Daily summary <b>hotovo</b>. Páry: <code>$PAIRS</code>"; fi
+          echo "Sending Telegram message: $msg"
+          python scripts/notify.py "$msg" || echo "Notify failed (workflow stále OK)"
+
+
+      
 
