@@ -2,7 +2,7 @@ name: Daily next-day summary (22:00 CET)
 
 on:
   schedule:
-    - cron: "0 20 * * *"   # 22:00 CET (20:00 UTC) – uprav si dle potřeby
+    - cron: "0 20 * * *"   # 22:00 CET (20:00 UTC)
   workflow_dispatch:
     inputs:
       pairs:
@@ -16,10 +16,12 @@ jobs:
     env:
       PAIRS: ${{ inputs.pairs != '' && inputs.pairs || 'EURUSD,USDJPY' }}
       TZ: Europe/Prague
+      # pro Python skripty
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-      TG_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}   # pro notify.py
-      TG_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}       # pro notify.py
+      # pro notify.py (stejné hodnoty, jiné názvy proměnných)
+      TG_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TG_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
     steps:
       - name: Checkout
@@ -43,19 +45,31 @@ jobs:
             exit 0
           fi
 
+      - name: Run daily summary
+        id: runpy
+        shell: bash
+        run: |
+          echo "Cílové páry: $PAIRS"
+          set +e
+          python scripts/nextday_summary.py --pairs "$PAIRS"
+          code=$?
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"   # <<< DŮLEŽITÉ
+          if [ $code -eq 2 ]; then
+            echo "Žádná data – beru jako OK."
+            exit 0
+          elif [ $code -ne 0 ]; then
+            echo "Skript spadl s kódem: $code"
+            exit $code
+          fi
+          echo "Hotovo."
+
       - name: Notify Telegram
         if: always()
         shell: bash
         run: |
           code="${{ steps.runpy.outputs.exit_code }}"
-          # default message (error)
           msg="❌ Daily summary selhalo (exit $code). Páry: <code>$PAIRS</code>"
-          # přepiš podle exit kódu
           if [ "$code" = "2" ]; then msg="✅ Daily summary proběhlo: <b>bez nových dat</b>. Páry: <code>$PAIRS</code>"; fi
           if [ "$code" = "0" ]; then msg="✅ Daily summary <b>hotovo</b>. Páry: <code>$PAIRS</code>"; fi
           echo "Sending Telegram message: $msg"
           python scripts/notify.py "$msg" || echo "Notify failed (workflow stále OK)"
-
-
-      
-
