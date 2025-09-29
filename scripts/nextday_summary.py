@@ -109,7 +109,6 @@ def main():
         elif not actual and dt >= now_utc:
             upcoming.append(f"• {dt.strftime('%H:%M')} <b>{cur}</b> {title}" + (f" (Fcst: {forecast})" if forecast else ""))
 
-    # --- Diagnostická zpráva: pošleme VŽDY souhrn s čísly ---
     lines = [f"🔎 <b>Fundament souhrn (EUR/USD/JPY)</b>",
              f"Feed items: <code>{len(feed)}</code> | Relevant (EUR/USD/JPY): <code>{total_rel}</code>",
              f"Dnes zveřejněno: <code>{len(published)}</code> | Dnes ještě přijde: <code>{len(upcoming)}</code>"]
@@ -132,4 +131,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
