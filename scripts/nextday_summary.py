@@ -3,8 +3,10 @@ import os, sys, json, argparse, datetime, urllib.request, urllib.parse
 
 SEEN_FILE = os.path.join("data", "seen.json")
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TG_BOT_TOKEN")
-TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID")   or os.getenv("TG_CHAT_ID")
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TG_BOT_TOKEN")
+CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID")   or os.getenv("TG_CHAT_ID")
+
+FEED_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 
 def pairs_to_currencies(pairs_list):
     cur = set()
@@ -29,12 +31,12 @@ def save_seen(seen):
         json.dump(sorted(list(seen)), f, ensure_ascii=False, indent=2)
 
 def send_telegram(text: str):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+    if not BOT_TOKEN or not CHAT_ID:
         print("DEBUG: TELEGRAM env missing; skip send.")
         return
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     data = urllib.parse.urlencode({
-        "chat_id": TELEGRAM_CHAT_ID,
+        "chat_id": CHAT_ID,
         "text": text,
         "parse_mode": "HTML",
         "disable_web_page_preview": True
@@ -42,13 +44,12 @@ def send_telegram(text: str):
     with urllib.request.urlopen(urllib.request.Request(url, data=data, method="POST"), timeout=20) as resp:
         print("Telegram HTTP:", resp.status)
 
-def fetch_calendar_json():
-    # Týdenní JSON feed od FF (funguje na GHA)
-    url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
-    with urllib.request.urlopen(url, timeout=30) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+def fetch_feed():
+    with urllib.request.urlopen(FEED_URL, timeout=30) as resp:
+        raw = resp.read().decode("utf-8")
+        return json.loads(raw)
 
-def fmt_dt_utc(ts: int) -> datetime.datetime:
+def fmt(ts):
     return datetime.datetime.utcfromtimestamp(int(ts))
 
 def main():
@@ -61,75 +62,74 @@ def main():
         print("No pairs provided."); sys.exit(2)
 
     target = pairs_to_currencies(pairs)  # {'EUR','USD','JPY'}
-    print("Target currencies:", sorted(list(target)))
+    print("Target currencies:", sorted(target))
 
     try:
-        feed = fetch_calendar_json()
+        feed = fetch_feed()
     except Exception as e:
-        print("Calendar fetch error:", e)
+        msg = f"❗️Calendar fetch error: {e}"
+        print(msg)
+        send_telegram(msg)
         sys.exit(2)
+
+    print("Feed items:", len(feed))
 
     seen = load_seen()
     now_utc = datetime.datetime.utcnow()
-    today_utc = now_utc.date()
+    today = now_utc.date()
 
-    published_lines = []  # mají 'actual'
-    upcoming_lines  = []  # zatím bez 'actual', dnes a čas >= teď
+    published = []
+    upcoming = []
+    total_rel = 0
 
     for ev in feed:
         cur = (ev.get("country") or "").upper()
         if cur not in target:
             continue
+        total_rel += 1
 
         ts = ev.get("timestamp")
         if not ts:
             continue
-        dt = fmt_dt_utc(ts)
-        if dt.date() != today_utc:
-            continue
-
+        dt = fmt(ts)
         title    = (ev.get("title") or "").strip()
         actual   = str(ev.get("actual") or "").strip()
         forecast = str(ev.get("forecast") or "").strip()
         previous = str(ev.get("previous") or "").strip()
         impact   = str(ev.get("impact") or "").strip()
 
+        if dt.date() != today:
+            continue
+
         key = f"{cur}|{title}|{ts}|{actual}"
 
-        if actual:
-            if key in seen:
-                continue
-            line = f"• {dt.strftime('%H:%M')} <b>{cur}</b> {title} — Actual: <b>{actual}</b> | Fcst: {forecast} | Prev: {previous} (Impact: {impact})"
-            published_lines.append(line)
+        if actual and key not in seen:
+            published.append(f"• {dt.strftime('%H:%M')} <b>{cur}</b> {title} — Actual: <b>{actual}</b> | Fcst: {forecast} | Prev: {previous} (Impact: {impact})")
             seen.add(key)
-        else:
-            if dt >= now_utc:
-                line = f"• {dt.strftime('%H:%M')} <b>{cur}</b> {title}" + (f" (Fcst: {forecast})" if forecast else "")
-                upcoming_lines.append(line)
+        elif not actual and dt >= now_utc:
+            upcoming.append(f"• {dt.strftime('%H:%M')} <b>{cur}</b> {title}" + (f" (Fcst: {forecast})" if forecast else ""))
 
-    # poskládej zprávu – pošleme vždy nějaký souhrn
-    parts = []
-    if published_lines:
-        parts.append("📢 <b>Dnešní fundamenty (zveřejněno)</b>\n" + "\n".join(published_lines))
-    if upcoming_lines:
-        # omez, ať není zpráva moc dlouhá
-        MAX_LINES = 15
-        short = upcoming_lines[:MAX_LINES]
-        more  = len(upcoming_lines) - len(short)
-        block = "⏳ <b>Dnes ještě přijde</b>\n" + "\n".join(short)
-        if more > 0:
-            block += f"\n… a dalších {more}"
-        parts.append(block)
+    # --- Diagnostická zpráva: pošleme VŽDY souhrn s čísly ---
+    lines = [f"🔎 <b>Fundament souhrn (EUR/USD/JPY)</b>",
+             f"Feed items: <code>{len(feed)}</code> | Relevant (EUR/USD/JPY): <code>{total_rel}</code>",
+             f"Dnes zveřejněno: <code>{len(published)}</code> | Dnes ještě přijde: <code>{len(upcoming)}</code>"]
 
-    if not parts:
-        send_telegram("ℹ️ Dnes žádné relevantní události pro <b>EUR/USD/JPY</b>.")
-        save_seen(seen)
-        sys.exit(0)
+    if published:
+        lines.append("\n📢 <b>Zveřejněno dnes</b>")
+        lines.extend(published[:20])
+        if len(published) > 20:
+            lines.append(f"… a dalších {len(published)-20}")
 
-    body = "\n\n".join(parts)
-    send_telegram(body)
+    if upcoming:
+        lines.append("\n⏳ <b>Dnes ještě přijde</b>")
+        lines.extend(upcoming[:20])
+        if len(upcoming) > 20:
+            lines.append(f"… a dalších {len(upcoming)-20}")
+
+    send_telegram("\n".join(lines))
     save_seen(seen)
     sys.exit(0)
 
 if __name__ == "__main__":
     main()
+
