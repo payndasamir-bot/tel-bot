@@ -16,8 +16,10 @@ jobs:
     env:
       PAIRS: ${{ inputs.pairs != '' && inputs.pairs || 'EURUSD,USDJPY' }}
       TZ: Europe/Prague
-      TG_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      TG_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      TG_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}   # pro notify.py
+      TG_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}       # pro notify.py
 
     steps:
       - name: Checkout
