@@ -43,12 +43,12 @@ def send_telegram(text: str):
         print("Telegram HTTP:", resp.status)
 
 def fetch_calendar_json():
-    # Lehký JSON feed od FF (týdenní přehled)
+    # Týdenní JSON feed od FF (funguje na GHA)
     url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
     with urllib.request.urlopen(url, timeout=30) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
-def fmt_utc(ts):
+def fmt_dt_utc(ts: int) -> datetime.datetime:
     return datetime.datetime.utcfromtimestamp(int(ts))
 
 def main():
@@ -60,7 +60,7 @@ def main():
     if not pairs:
         print("No pairs provided."); sys.exit(2)
 
-    target = pairs_to_currencies(pairs)  # např. {'EUR','USD','JPY'}
+    target = pairs_to_currencies(pairs)  # {'EUR','USD','JPY'}
     print("Target currencies:", sorted(list(target)))
 
     try:
@@ -70,60 +70,66 @@ def main():
         sys.exit(2)
 
     seen = load_seen()
-    today_utc = datetime.datetime.utcnow().date()
-    tomorrow_utc = today_utc + datetime.timedelta(days=1)
+    now_utc = datetime.datetime.utcnow()
+    today_utc = now_utc.date()
 
-    # --- Dnešní souhrn (jen události, které už mají 'actual') ---
-    today_lines = []
+    published_lines = []  # mají 'actual'
+    upcoming_lines  = []  # zatím bez 'actual', dnes a čas >= teď
+
     for ev in feed:
         cur = (ev.get("country") or "").upper()
-        if cur not in target: 
+        if cur not in target:
             continue
+
         ts = ev.get("timestamp")
-        dt = fmt_utc(ts)
+        if not ts:
+            continue
+        dt = fmt_dt_utc(ts)
         if dt.date() != today_utc:
             continue
-        title = (ev.get("title") or "").strip()
-        actual = str(ev.get("actual") or "").strip()
+
+        title    = (ev.get("title") or "").strip()
+        actual   = str(ev.get("actual") or "").strip()
         forecast = str(ev.get("forecast") or "").strip()
         previous = str(ev.get("previous") or "").strip()
-        impact = str(ev.get("impact") or "").strip()
+        impact   = str(ev.get("impact") or "").strip()
 
         key = f"{cur}|{title}|{ts}|{actual}"
-        if actual and key not in seen:
+
+        if actual:
+            if key in seen:
+                continue
             line = f"• {dt.strftime('%H:%M')} <b>{cur}</b> {title} — Actual: <b>{actual}</b> | Fcst: {forecast} | Prev: {previous} (Impact: {impact})"
-            today_lines.append(line)
+            published_lines.append(line)
             seen.add(key)
+        else:
+            if dt >= now_utc:
+                line = f"• {dt.strftime('%H:%M')} <b>{cur}</b> {title}" + (f" (Fcst: {forecast})" if forecast else "")
+                upcoming_lines.append(line)
 
-    sent_any = False
-    if today_lines:
-        body = "📢 <b>Dnešní fundamenty (EUR/USD/JPY)</b>\n" + "\n".join(today_lines)
-        send_telegram(body)
-        sent_any = True
+    # poskládej zprávu – pošleme vždy nějaký souhrn
+    parts = []
+    if published_lines:
+        parts.append("📢 <b>Dnešní fundamenty (zveřejněno)</b>\n" + "\n".join(published_lines))
+    if upcoming_lines:
+        # omez, ať není zpráva moc dlouhá
+        MAX_LINES = 15
+        short = upcoming_lines[:MAX_LINES]
+        more  = len(upcoming_lines) - len(short)
+        block = "⏳ <b>Dnes ještě přijde</b>\n" + "\n".join(short)
+        if more > 0:
+            block += f"\n… a dalších {more}"
+        parts.append(block)
 
-    # --- Zítřejší přehled po 20:00 lokálního času (UTC+2/Prague) ---
-    # V runneru použijeme UTC, takže spustíme náhled vždy (nevadí).
-    now_hm = datetime.datetime.utcnow().strftime("%H:%M")
-    if now_hm >= "18:00":  # ~20:00 Prague v létě
-        tmrw_lines = []
-        for ev in feed:
-            cur = (ev.get("country") or "").upper()
-            if cur not in target: 
-                continue
-            dt = fmt_utc(ev.get("timestamp"))
-            if dt.date() != tomorrow_utc:
-                continue
-            title = (ev.get("title") or "").strip()
-            fc = str(ev.get("forecast") or "").strip()
-            line = f"• {dt.strftime('%H:%M')} <b>{cur}</b> {title}" + (f" (Fcst: {fc})" if fc else "")
-            tmrw_lines.append(line)
-        if tmrw_lines:
-            body = "📅 <b>Zítřejší události (EUR/USD/JPY)</b>\n" + "\n".join(tmrw_lines)
-            send_telegram(body)
-            sent_any = True
+    if not parts:
+        send_telegram("ℹ️ Dnes žádné relevantní události pro <b>EUR/USD/JPY</b>.")
+        save_seen(seen)
+        sys.exit(0)
 
+    body = "\n\n".join(parts)
+    send_telegram(body)
     save_seen(seen)
-    sys.exit(0 if sent_any else 2)
+    sys.exit(0)
 
 if __name__ == "__main__":
     main()
