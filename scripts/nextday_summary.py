@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 import os, sys, json, argparse, datetime, time
-import urllib.parse
-import requests  # důležité pro správné stažení JSONu (403 fix)
+import requests
 from html import escape
 
+# -----------------------------------
+# Config / constants
+# -----------------------------------
 SEEN_FILE = os.path.join("data", "seen.json")
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TG_BOT_TOKEN")
@@ -23,7 +25,11 @@ HEADERS = {
     "Cache-Control": "no-cache",
 }
 
+# -----------------------------------
+# Helpers
+# -----------------------------------
 def pairs_to_currencies(pairs_list):
+    """EURUSD,USDJPY -> {'EUR','USD','JPY'}"""
     cur = set()
     for p in pairs_list:
         p = p.upper().strip()
@@ -45,9 +51,8 @@ def save_seen(seen):
     with open(SEEN_FILE, "w", encoding="utf-8") as f:
         json.dump(sorted(list(seen)), f, ensure_ascii=False, indent=2)
 
-
 def fetch_feed():
-    """Stáhne JSON feed s hlavičkami + retry; řeší 403 Forbidden."""
+    """Stáhne JSON feed s hlavičkami + jednoduchý retry (řeší 403)."""
     urls = [PRIMARY_URL] + ALT_URLS
     last_err = None
     for url in urls:
@@ -67,6 +72,28 @@ def fetch_feed():
 def fmt(ts):
     return datetime.datetime.utcfromtimestamp(int(ts))
 
+def send_telegram(text: str):
+    """Bezpečné odeslání HTML zprávy do Telegramu (+log odpovědi)."""
+    if not BOT_TOKEN or not CHAT_ID:
+        print("DEBUG: TELEGRAM env missing; skip send.")
+        return
+
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": str(CHAT_ID),
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": "true",   # musí být řetězec
+    }
+    try:
+        r = requests.post(url, data=payload, timeout=20)
+        print("Telegram HTTP:", r.status_code, r.text[:300])
+    except Exception as e:
+        print("Telegram exception:", e)
+
+# -----------------------------------
+# Main
+# -----------------------------------
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--pairs", type=str, default=os.getenv("PAIRS", "EURUSD,USDJPY"))
@@ -93,8 +120,8 @@ def main():
     now_utc = datetime.datetime.utcnow()
     today = now_utc.date()
 
-    published = []
-    upcoming = []
+    published = []  # dnes s 'actual'
+    upcoming  = []  # dnes bez 'actual' a čas >= teď
     total_rel = 0
 
     for ev in feed:
@@ -107,14 +134,15 @@ def main():
         if not ts:
             continue
         dt = fmt(ts)
-        # --- raw hodnoty z feedu ---
+
+        # --- RAW hodnoty z feedu ---
         title_raw    = (ev.get("title") or "").strip()
         actual_raw   = str(ev.get("actual") or "").strip()
         forecast_raw = str(ev.get("forecast") or "").strip()
         previous_raw = str(ev.get("previous") or "").strip()
         impact_raw   = str(ev.get("impact") or "").strip()
 
-# --- escaped pro HTML (do zprávy) ---
+        # --- escaped pro HTML (do zprávy) ---
         title    = escape(title_raw)
         actual   = escape(actual_raw)
         forecast = escape(forecast_raw)
@@ -123,17 +151,17 @@ def main():
         cur_disp = escape(cur)
 
         if dt.date() != today:
-                continue
+            continue
 
-# POZOR: key z raw hodnot
+        # POZOR: key tvoříme z RAW hodnot (kvůli deduplikaci)
         key = f"{cur}|{title_raw}|{ts}|{actual_raw}"
 
         if actual_raw and key not in seen:
             published.append(
                 f"• {dt.strftime('%H:%M')} <b>{cur_disp}</b> {title} — "
                 f"Actual: <b>{actual}</b> | Fcst: {forecast} | Prev: {previous} (Impact: {impact})"
-                )
-                 seen.add(key)
+            )
+            seen.add(key)
 
         elif not actual_raw and dt >= now_utc:
             line = f"• {dt.strftime('%H:%M')} <b>{cur_disp}</b> {title}"
@@ -141,12 +169,12 @@ def main():
                 line += f" (Fcst: {forecast})"
             upcoming.append(line)
 
+    # --- Sestavení zprávy (mimo smyčku) ---
     lines = [
         f"🔎 <b>Fundament souhrn (EUR/USD/JPY)</b>",
         f"Feed items: <code>{len(feed)}</code> | Relevant (EUR/USD/JPY): <code>{total_rel}</code>",
         f"Dnes zveřejněno: <code>{len(published)}</code> | Dnes ještě přijde: <code>{len(upcoming)}</code>",
     ]
-
 
     if published:
         lines.append("\n📢 <b>Zveřejněno dnes</b>")
@@ -160,25 +188,7 @@ def main():
         if len(upcoming) > 20:
             lines.append(f"… a dalších {len(upcoming)-20}")
 
-    def send_telegram(text: str):
-    if not BOT_TOKEN or not CHAT_ID:
-        print("DEBUG: TELEGRAM env missing; skip send.")
-        return
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-
-    payload = {
-    "chat_id": str(CHAT_ID),
-    "text": text,
-    "parse_mode": "HTML",
-    "disable_web_page_preview": "true",  # musí být řetězec, ne True
-}
-
-
-    try:
-        r = requests.post(url, data=payload, timeout=20)
-        print("Telegram HTTP:", r.status_code, r.text[:300])  # ukaž i tělo (prvních 300 znaků)
-    except Exception as e:
-        print("Telegram exception:", e)
+    send_telegram("\n".join(lines))
     save_seen(seen)
     sys.exit(0)
 
