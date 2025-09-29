@@ -2,7 +2,7 @@ name: Daily next-day summary (22:00 CET)
 
 on:
   schedule:
-    - cron: "0 20 * * *"    # příklad – 22:00 CET (20:00 UTC)
+    - cron: "0 20 * * *"   # 22:00 CET (20:00 UTC) – uprav si dle potřeby
   workflow_dispatch:
     inputs:
       pairs:
@@ -16,19 +16,56 @@ jobs:
     env:
       PAIRS: ${{ inputs.pairs != '' && inputs.pairs || 'EURUSD,USDJPY' }}
       TZ: Europe/Prague
+      TG_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TG_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: "3.11" }
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps (optional)
+        if: hashFiles('requirements.txt') != ''
+        run: pip install -r requirements.txt
+
       - name: Skip on weekend
         run: |
-          dow=$(date +%u); [ "$dow" -ge 6 ] && echo "Víkend – skip." && exit 0 || true
+          dow=$(date +%u)
+          if [ "$dow" -ge 6 ]; then
+            echo "Víkend – workflow se přeskočí."
+            python scripts/notify.py "ℹ️ Daily summary přeskočeno (víkend). Páry: <code>$PAIRS</code>"
+            exit 0
+          fi
+
       - name: Run daily summary
+        id: runpy
+        shell: bash
         run: |
           echo "Cílové páry: $PAIRS"
           set +e
           python scripts/nextday_summary.py --pairs "$PAIRS"
           code=$?
-          if [ $code -eq 2 ]; then echo "Žádná data – OK."; exit 0; fi
-          if [ $code -ne 0 ]; then echo "Chyba: $code"; exit $code; fi
+          echo "exit_code=$code" >> "$GITHUB_OUTPUT"
+          if [ $code -eq 2 ]; then
+            echo "Žádná data – beru jako OK."
+            exit 0
+          elif [ $code -ne 0 ]; then
+            echo "Skript spadl s kódem: $code"
+            exit $code
+          fi
           echo "Hotovo."
+
+      - name: Notify Telegram
+        if: always()
+        run: |
+          code="${{ steps.runpy.outputs.exit_code }}"
+          if [ "$code" = "2" ]; then
+            python scripts/notify.py "✅ Daily summary proběhlo: <b>bez nových dat</b>. Páry: <code>$PAIRS</code>"
+          elif [ "$code" = "0" ]; then
+            python scripts/notify.py "✅ Daily summary <b>hotovo</b>. Páry: <code>$PAIRS</code>"
+          else
+            python scripts/notify.py "❌ Daily summary selhalo (exit $code). Páry: <code>$PAIRS</code>"
