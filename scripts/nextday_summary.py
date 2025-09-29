@@ -1,12 +1,26 @@
 #!/usr/bin/env python3
-import os, sys, json, argparse, datetime, urllib.request, urllib.parse
+import os, sys, json, argparse, datetime, time
+import urllib.parse
+import requests  # důležité pro správné stažení JSONu (403 fix)
 
 SEEN_FILE = os.path.join("data", "seen.json")
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TG_BOT_TOKEN")
 CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID")   or os.getenv("TG_CHAT_ID")
 
-FEED_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+PRIMARY_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+ALT_URLS = [
+    "https://cdn-nfs.faireconomy.media/ff_calendar_thisweek.json",
+]
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "application/json,text/plain,*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.forexfactory.com/calendar",
+    "Cache-Control": "no-cache",
+}
 
 def pairs_to_currencies(pairs_list):
     cur = set()
@@ -41,13 +55,29 @@ def send_telegram(text: str):
         "parse_mode": "HTML",
         "disable_web_page_preview": True
     }).encode("utf-8")
-    with urllib.request.urlopen(urllib.request.Request(url, data=data, method="POST"), timeout=20) as resp:
-        print("Telegram HTTP:", resp.status)
+    try:
+        r = requests.post(url, data=data, timeout=20)
+        print("Telegram HTTP:", r.status_code)
+    except Exception as e:
+        print("Telegram exception:", e)
 
 def fetch_feed():
-    with urllib.request.urlopen(FEED_URL, timeout=30) as resp:
-        raw = resp.read().decode("utf-8")
-        return json.loads(raw)
+    """Stáhne JSON feed s hlavičkami + retry; řeší 403 Forbidden."""
+    urls = [PRIMARY_URL] + ALT_URLS
+    last_err = None
+    for url in urls:
+        for attempt in range(3):
+            try:
+                r = requests.get(url, headers=HEADERS, timeout=20)
+                if r.status_code >= 400:
+                    raise requests.HTTPError(f"{r.status_code} {r.reason}")
+                return r.json()
+            except Exception as e:
+                last_err = e
+                wait = 1 + attempt  # 1s, 2s, 3s
+                print(f"fetch attempt {attempt+1} for {url} failed: {e}; retry in {wait}s")
+                time.sleep(wait)
+    raise last_err
 
 def fmt(ts):
     return datetime.datetime.utcfromtimestamp(int(ts))
