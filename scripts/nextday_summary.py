@@ -1,160 +1,129 @@
 #!/usr/bin/env python3
-import requests
-from bs4 import BeautifulSoup
-import datetime
-import os
-import json
-import sys
+import os, sys, json, argparse, datetime, urllib.request, urllib.parse
 
-# ---- Nastavení ----
-# Filtrujeme jen měny relevantní pro EURUSD a USDJPY:
-RELEVANT_CURRENCIES = {"USD", "EUR", "JPY"}
-
-# Cesta k "seen.json" v kořeni repa (složka data/)
 SEEN_FILE = os.path.join("data", "seen.json")
 
-# Načtení proměnných z GitHub Secrets
-# Zachovám tvoje názvy, ale umím i alternativu (kdyby se v env jmenovaly jinak)
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TG_BOT_TOKEN")
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or os.getenv("TG_CHAT_ID")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TG_BOT_TOKEN")
+TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID")   or os.getenv("TG_CHAT_ID")
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                  "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-}
-
-# ---- Pomocné funkce ----
-def send_telegram_message(text: str):
-    """Pošle zprávu do Telegramu (bez pádu na chybě)."""
-    if not TELEGRAM_TOKEN or not CHAT_ID:
-        print("Missing TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID in env (skip send).")
-        return
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
-    try:
-        r = requests.post(url, data=payload, timeout=20)
-        print("Telegram status:", r.status_code, r.text[:200])
-    except Exception as e:
-        print("Error sending message:", e)
+def pairs_to_currencies(pairs_list):
+    cur = set()
+    for p in pairs_list:
+        p = p.upper().strip()
+        if len(p) == 6:
+            cur.add(p[:3]); cur.add(p[3:])
+    return cur
 
 def load_seen():
     try:
         if os.path.exists(SEEN_FILE):
             with open(SEEN_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-    except Exception as e:
-        print("load_seen error:", e)
-    return []
+                return set(json.load(f))
+    except Exception:
+        pass
+    return set()
 
 def save_seen(seen):
-    try:
-        os.makedirs(os.path.dirname(SEEN_FILE), exist_ok=True)
-        with open(SEEN_FILE, "w", encoding="utf-8") as f:
-            json.dump(seen, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print("save_seen error:", e)
+    os.makedirs(os.path.dirname(SEEN_FILE), exist_ok=True)
+    with open(SEEN_FILE, "w", encoding="utf-8") as f:
+        json.dump(sorted(list(seen)), f, ensure_ascii=False, indent=2)
 
-def fetch_calendar(day="today"):
-    """Stáhne kalendář z ForexFactory pro 'today' nebo 'tomorrow'."""
-    url = f"https://www.forexfactory.com/calendar?day={day}"
-    r = requests.get(url, headers=HEADERS, timeout=30)
-    r.raise_for_status()
-    soup = BeautifulSoup(r.text, "html.parser")
-    rows = soup.select("tr.calendar__row")
-    events = []
-    for row in rows:
-        time = row.select_one(".calendar__time")
-        currency = row.select_one(".calendar__currency")
-        impact = row.select_one(".impact")
-        event = row.select_one(".calendar__event")
-        actual = row.select_one(".calendar__actual")
-        forecast = row.select_one(".calendar__forecast")
-        previous = row.select_one(".calendar__previous")
+def send_telegram(text: str):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("DEBUG: TELEGRAM env missing; skip send.")
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    data = urllib.parse.urlencode({
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True
+    }).encode("utf-8")
+    with urllib.request.urlopen(urllib.request.Request(url, data=data, method="POST"), timeout=20) as resp:
+        print("Telegram HTTP:", resp.status)
 
-        cur = currency.get_text(strip=True) if currency else ""
-        evt_name = event.get_text(strip=True) if event else ""
+def fetch_calendar_json():
+    # Lehký JSON feed od FF (týdenní přehled)
+    url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+    with urllib.request.urlopen(url, timeout=30) as resp:
+        return json.loads(resp.read().decode("utf-8"))
 
-        if evt_name:
-            events.append({
-                "time": time.get_text(strip=True) if time else "",
-                "currency": cur,
-                "impact": impact.get("title") if impact else "",
-                "event": evt_name,
-                "actual": (actual.get_text(strip=True) if actual else ""),
-                "forecast": (forecast.get_text(strip=True) if forecast else ""),
-                "previous": (previous.get_text(strip=True) if previous else ""),
-            })
-    return events
+def fmt_utc(ts):
+    return datetime.datetime.utcfromtimestamp(int(ts))
 
-def analyze_event(ev):
-    """Základní komentář podle typu události."""
-    name = ev["event"].lower()
-    if "cpi" in name or "inflation" in name:
-        return "📊 Inflace: vyšší než forecast = silnější měna, často tlak na pokles zlata."
-    if "gdp" in name:
-        return "📈 HDP: vyšší než forecast = silnější měna."
-    if "unemployment" in name or "labor" in name or "employment" in name or "jobs" in name:
-        return "👷 Trh práce: nižší nezaměstnanost = silnější měna."
-    if "retail" in name:
-        return "🛍️ Maloobchodní tržby: vyšší spotřeba = silnější měna."
-    return ""
-
-# ---- Hlavní běh ----
 def main():
-    seen = load_seen()
-    sent_any = False
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--pairs", type=str, default=os.getenv("PAIRS", "EURUSD,USDJPY"))
+    args = parser.parse_args()
 
-    # 1) Dnešní události – pošleme jen USD/EUR/JPY (relevantní pro EURUSD & USDJPY)
+    pairs = [p.strip() for p in args.pairs.split(",") if p.strip()]
+    if not pairs:
+        print("No pairs provided."); sys.exit(2)
+
+    target = pairs_to_currencies(pairs)  # např. {'EUR','USD','JPY'}
+    print("Target currencies:", sorted(list(target)))
+
     try:
-        events = fetch_calendar("today")
+        feed = fetch_calendar_json()
     except Exception as e:
-        print("fetch today error:", e)
-        events = []
+        print("Calendar fetch error:", e)
+        sys.exit(2)
 
-    for ev in events:
-        if ev["currency"] not in RELEVANT_CURRENCIES:
+    seen = load_seen()
+    today_utc = datetime.datetime.utcnow().date()
+    tomorrow_utc = today_utc + datetime.timedelta(days=1)
+
+    # --- Dnešní souhrn (jen události, které už mají 'actual') ---
+    today_lines = []
+    for ev in feed:
+        cur = (ev.get("country") or "").upper()
+        if cur not in target: 
             continue
-        # posílej jen s "Actual" (po zveřejnění) a jen jednou
-        key = f"{ev['currency']}|{ev['event']}|{ev['time']}|{ev['actual']}"
-        if ev["actual"] and key not in seen:
-            msg = (
-                f"📢 <b>{ev['currency']}</b> {ev['event']}\n"
-                f"🕒 {ev['time']}\n"
-                f"Actual: <b>{ev['actual']}</b> | Forecast: {ev['forecast']} | Previous: {ev['previous']}\n"
-                f"{analyze_event(ev)}"
-            ).strip()
-            send_telegram_message(msg)
-            seen.append(key)
+        ts = ev.get("timestamp")
+        dt = fmt_utc(ts)
+        if dt.date() != today_utc:
+            continue
+        title = (ev.get("title") or "").strip()
+        actual = str(ev.get("actual") or "").strip()
+        forecast = str(ev.get("forecast") or "").strip()
+        previous = str(ev.get("previous") or "").strip()
+        impact = str(ev.get("impact") or "").strip()
+
+        key = f"{cur}|{title}|{ts}|{actual}"
+        if actual and key not in seen:
+            line = f"• {dt.strftime('%H:%M')} <b>{cur}</b> {title} — Actual: <b>{actual}</b> | Fcst: {forecast} | Prev: {previous} (Impact: {impact})"
+            today_lines.append(line)
+            seen.add(key)
+
+    sent_any = False
+    if today_lines:
+        body = "📢 <b>Dnešní fundamenty (EUR/USD/JPY)</b>\n" + "\n".join(today_lines)
+        send_telegram(body)
+        sent_any = True
+
+    # --- Zítřejší přehled po 20:00 lokálního času (UTC+2/Prague) ---
+    # V runneru použijeme UTC, takže spustíme náhled vždy (nevadí).
+    now_hm = datetime.datetime.utcnow().strftime("%H:%M")
+    if now_hm >= "18:00":  # ~20:00 Prague v létě
+        tmrw_lines = []
+        for ev in feed:
+            cur = (ev.get("country") or "").upper()
+            if cur not in target: 
+                continue
+            dt = fmt_utc(ev.get("timestamp"))
+            if dt.date() != tomorrow_utc:
+                continue
+            title = (ev.get("title") or "").strip()
+            fc = str(ev.get("forecast") or "").strip()
+            line = f"• {dt.strftime('%H:%M')} <b>{cur}</b> {title}" + (f" (Fcst: {fc})" if fc else "")
+            tmrw_lines.append(line)
+        if tmrw_lines:
+            body = "📅 <b>Zítřejší události (EUR/USD/JPY)</b>\n" + "\n".join(tmrw_lines)
+            send_telegram(body)
             sent_any = True
 
     save_seen(seen)
-
-    # 2) Večer pošli zítřejší přehled (jen USD/EUR/JPY)
-    now_hm = datetime.datetime.now().strftime("%H:%M")
-    if now_hm >= "20:00":
-        try:
-            tomorrow_events = fetch_calendar("tomorrow")
-        except Exception as e:
-            print("fetch tomorrow error:", e)
-            tomorrow_events = []
-
-        rel = [ev for ev in tomorrow_events if ev["currency"] in RELEVANT_CURRENCIES]
-        if rel:
-            lines = ["📅 <b>Zítřejší události (EUR, USD, JPY):</b>"]
-            for ev in rel:
-                line = f"- {ev['time']} {ev['currency']} {ev['event']}"
-                if ev["forecast"]:
-                    line += f" (Forecast: {ev['forecast']})"
-                lines.append(line)
-            send_telegram_message("\n".join(lines))
-            sent_any = True
-
-    # Nikdy neshazuj workflow – vrať 0 i když nic není
-    if sent_any:
-        sys.exit(0)
-    else:
-        # 2 = 'žádná nová data' (náš workflow to bere jako OK)
-        sys.exit(2)
+    sys.exit(0 if sent_any else 2)
 
 if __name__ == "__main__":
     main()
