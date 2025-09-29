@@ -63,24 +63,4 @@ jobs:
           fi
           echo "Hotovo."
 
-      - name: Notify Telegram
-        if: always()
-        shell: bash
-        run: |
-          set -e
-          code="${{ steps.runpy.outputs.exit_code }}"
-          msg="❌ Daily summary selhalo (exit $code). Páry: <code>$PAIRS</code>"
-          if [ "$code" = "2" ]; then msg="✅ Daily summary proběhlo: <b>bez nových dat</b>. Páry: <code>$PAIRS</code>"; fi
-          if [ "$code" = "0" ]; then msg="✅ Daily summary <b>hotovo</b>. Páry: <code>$PAIRS</code>"; fi
-
-          echo "DEBUG: code='$code'"
-          echo "Sending Telegram message: $msg"
-
-          # Bezpečná kontrola, že secrets existují (nevypisujeme hodnoty)
-          if [ -z "${TG_BOT_TOKEN:-}" ] || [ -z "${TG_CHAT_ID:-}" ]; then
-            echo "DEBUG: TG_BOT_TOKEN or TG_CHAT_ID is empty. (Check repository Secrets)"
-          else
-            # -u = unbuffered, ať vidíme výstup
-            python -u scripts/notify.py "$msg" || echo "Notify.py returned non-zero (ignored)"
-          fi
-
+     
