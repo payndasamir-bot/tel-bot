@@ -69,3 +69,4 @@ jobs:
             python scripts/notify.py "✅ Daily summary <b>hotovo</b>. Páry: <code>$PAIRS</code>"
           else
             python scripts/notify.py "❌ Daily summary selhalo (exit $code). Páry: <code>$PAIRS</code>"
+
