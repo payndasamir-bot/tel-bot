@@ -2,10 +2,10 @@
 import os, sys, json, argparse, datetime, time
 import requests
 from html import escape
+from bs4 import BeautifulSoup
+from zoneinfo import ZoneInfo
 
-# -----------------------------------
-# Config / constants
-# -----------------------------------
+# ------------------ Config ------------------
 SEEN_FILE = os.path.join("data", "seen.json")
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TG_BOT_TOKEN")
@@ -25,9 +25,16 @@ HEADERS = {
     "Cache-Control": "no-cache",
 }
 
-# -----------------------------------
-# Helpers
-# -----------------------------------
+HTML_HEADERS = {
+    **HEADERS,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+}
+
+# Lokální časová zóna (z Actions posíláme TZ=Europe/Prague)
+TZ_NAME = os.getenv("TZ", "Europe/Prague")
+TZ_LOCAL = ZoneInfo(TZ_NAME)
+
+# ------------------ Helpers ------------------
 def pairs_to_currencies(pairs_list):
     """EURUSD,USDJPY -> {'EUR','USD','JPY'}"""
     cur = set()
@@ -51,39 +58,16 @@ def save_seen(seen):
     with open(SEEN_FILE, "w", encoding="utf-8") as f:
         json.dump(sorted(list(seen)), f, ensure_ascii=False, indent=2)
 
-def fetch_feed():
-    """Stáhne JSON feed s hlavičkami + jednoduchý retry (řeší 403)."""
-    urls = [PRIMARY_URL] + ALT_URLS
-    last_err = None
-    for url in urls:
-        for attempt in range(3):
-            try:
-                r = requests.get(url, headers=HEADERS, timeout=20)
-                if r.status_code >= 400:
-                    raise requests.HTTPError(f"{r.status_code} {r.reason}")
-                return r.json()
-            except Exception as e:
-                last_err = e
-                wait = 1 + attempt  # 1s, 2s, 3s
-                print(f"fetch attempt {attempt+1} for {url} failed: {e}; retry in {wait}s")
-                time.sleep(wait)
-    raise last_err
-
-def fmt(ts):
-    return datetime.datetime.utcfromtimestamp(int(ts))
-
 def send_telegram(text: str):
-    """Bezpečné odeslání HTML zprávy do Telegramu (+log odpovědi)."""
     if not BOT_TOKEN or not CHAT_ID:
         print("DEBUG: TELEGRAM env missing; skip send.")
         return
-
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": str(CHAT_ID),
         "text": text,
         "parse_mode": "HTML",
-        "disable_web_page_preview": "true",   # musí být řetězec
+        "disable_web_page_preview": "true",
     }
     try:
         r = requests.post(url, data=payload, timeout=20)
@@ -91,9 +75,71 @@ def send_telegram(text: str):
     except Exception as e:
         print("Telegram exception:", e)
 
-# -----------------------------------
-# Main
-# -----------------------------------
+# ---------- JSON feed (primary) ----------
+def fetch_feed_json():
+    """Stáhne JSON feed s hlavičkami + retry (řeší 403)"""
+    urls = [PRIMARY_URL] + ALT_URLS
+    last_err = None
+    for url in urls:
+        for attempt in range(3):
+            try:
+                r = requests.get(
+                    url,
+                    headers=HEADERS,
+                    params={"_": int(time.time())},  # cache buster
+                    timeout=20,
+                )
+                if r.status_code >= 400:
+                    raise requests.HTTPError(f"{r.status_code} {r.reason}")
+                return r.json()
+            except Exception as e:
+                last_err = e
+                wait = 1 + attempt
+                print(f"fetch attempt {attempt+1} for {url} failed: {e}; retry in {wait}s")
+                time.sleep(wait)
+    raise last_err
+
+def to_local(ts: int) -> datetime.datetime:
+    """Timestamp (UTC) -> lokální aware datetime."""
+    return datetime.datetime.fromtimestamp(int(ts), datetime.timezone.utc).astimezone(TZ_LOCAL)
+
+# ---------- HTML fallback (when JSON blocked) ----------
+def fetch_today_html_events():
+    """Scrape ForexFactory calendar ?day=today (fallback). Časy jsou dle FF stránky (bez přesného TZ)."""
+    url = "https://www.forexfactory.com/calendar?day=today"
+    r = requests.get(url, headers=HTML_HEADERS, timeout=25)
+    if r.status_code >= 400:
+        raise requests.HTTPError(f"{r.status_code} {r.reason}")
+
+    soup = BeautifulSoup(r.text, "html.parser")
+    rows = soup.select("tr.calendar__row")
+
+    events = []
+    for row in rows:
+        time_el = row.select_one(".calendar__time")
+        cur_el  = row.select_one(".calendar__currency")
+        ev_el   = row.select_one(".calendar__event")
+        imp_el  = row.select_one(".impact")
+        act_el  = row.select_one(".calendar__actual")
+        fc_el   = row.select_one(".calendar__forecast")
+        prev_el = row.select_one(".calendar__previous")
+
+        title = (ev_el.get_text(strip=True) if ev_el else "")
+        if not title:
+            continue
+
+        events.append({
+            "time_str": time_el.get_text(strip=True) if time_el else "",
+            "cur": (cur_el.get_text(strip=True) if cur_el else "").upper(),
+            "title": title,
+            "impact": imp_el.get("title") if imp_el else "",
+            "actual": act_el.get_text(strip=True) if act_el else "",
+            "forecast": fc_el.get_text(strip=True) if fc_el else "",
+            "previous": prev_el.get_text(strip=True) if prev_el else "",
+        })
+    return events
+
+# ------------------ Main ------------------
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--pairs", type=str, default=os.getenv("PAIRS", "EURUSD,USDJPY"))
@@ -106,73 +152,122 @@ def main():
     target = pairs_to_currencies(pairs)  # {'EUR','USD','JPY'}
     print("Target currencies:", sorted(target))
 
-    try:
-        feed = fetch_feed()
-    except Exception as e:
-        msg = f"❗️Calendar fetch error: {e}"
-        print(msg)
-        send_telegram(msg)
-        sys.exit(2)
+    # Lokální "teď" a dnešní datum
+    now_local = datetime.datetime.now(TZ_LOCAL)
+    today_local = now_local.date()
 
-    print("Feed items:", len(feed))
+    # 1) Zkus JSON feed
+    feed = None
+    json_ok = False
+    try:
+        feed = fetch_feed_json()
+        json_ok = True
+    except Exception as e:
+        print("JSON feed failed:", e)
 
     seen = load_seen()
-    now_utc = datetime.datetime.utcnow()
-    today = now_utc.date()
-
-    published = []  # dnes s 'actual'
-    upcoming  = []  # dnes bez 'actual' a čas >= teď
+    published = []
+    upcoming  = []
     total_rel = 0
 
-    for ev in feed:
-        cur = (ev.get("country") or "").upper()
-        if cur not in target:
-            continue
-        total_rel += 1
+    if json_ok and isinstance(feed, list):
+        print("Feed items:", len(feed))
+        # --- zpracování JSON feedu (v lokálním čase) ---
+        for ev in feed:
+            cur = (ev.get("country") or "").upper()
+            if cur not in target:
+                continue
+            total_rel += 1
 
-        ts = ev.get("timestamp")
-        if not ts:
-            continue
-        dt = fmt(ts)
+            ts = ev.get("timestamp")
+            if not ts:
+                continue
+            dt = to_local(ts)
 
-        # --- RAW hodnoty z feedu ---
-        title_raw    = (ev.get("title") or "").strip()
-        actual_raw   = str(ev.get("actual") or "").strip()
-        forecast_raw = str(ev.get("forecast") or "").strip()
-        previous_raw = str(ev.get("previous") or "").strip()
-        impact_raw   = str(ev.get("impact") or "").strip()
+            title_raw    = (ev.get("title") or "").strip()
+            actual_raw   = str(ev.get("actual") or "").strip()
+            forecast_raw = str(ev.get("forecast") or "").strip()
+            previous_raw = str(ev.get("previous") or "").strip()
+            impact_raw   = str(ev.get("impact") or "").strip()
 
-        # --- escaped pro HTML (do zprávy) ---
-        title    = escape(title_raw)
-        actual   = escape(actual_raw)
-        forecast = escape(forecast_raw)
-        previous = escape(previous_raw)
-        impact   = escape(impact_raw)
-        cur_disp = escape(cur)
+            title    = escape(title_raw)
+            actual   = escape(actual_raw)
+            forecast = escape(forecast_raw)
+            previous = escape(previous_raw)
+            impact   = escape(impact_raw)
+            cur_disp = escape(cur)
 
-        if dt.date() != today:
-            continue
+            # *** KLÍČOVÉ: dnes podle lokálního data ***
+            if dt.date() != today_local:
+                continue
 
-        # POZOR: key tvoříme z RAW hodnot (kvůli deduplikaci)
-        key = f"{cur}|{title_raw}|{ts}|{actual_raw}"
+            key = f"{cur}|{title_raw}|{ts}|{actual_raw}"
 
-        if actual_raw and key not in seen:
-            published.append(
-                f"• {dt.strftime('%H:%M')} <b>{cur_disp}</b> {title} — "
-                f"Actual: <b>{actual}</b> | Fcst: {forecast} | Prev: {previous} (Impact: {impact})"
-            )
-            seen.add(key)
+            if actual_raw and key not in seen:
+                published.append(
+                    f"• {dt.strftime('%H:%M')} <b>{cur_disp}</b> {title} — "
+                    f"Actual: <b>{actual}</b> | Fcst: {forecast} | Prev: {previous} (Impact: {impact})"
+                )
+                seen.add(key)
 
-        elif not actual_raw and dt >= now_utc:
-            line = f"• {dt.strftime('%H:%M')} <b>{cur_disp}</b> {title}"
-            if forecast:
-                line += f" (Fcst: {forecast})"
-            upcoming.append(line)
+            elif not actual_raw and dt >= now_local:
+                line = f"• {dt.strftime('%H:%M')} <b>{cur_disp}</b> {title}"
+                if forecast:
+                    line += f" (Fcst: {forecast})"
+                upcoming.append(line)
+
+        prefix = "🔎 <b>Fundament souhrn (EUR/USD/JPY)</b>"
+    else:
+        # 2) Fallback: HTML scraping „today“ (bez přesného TZ – orientačně)
+        try:
+            html_events = fetch_today_html_events()
+            for ev in html_events:
+                cur = (ev["cur"] or "").upper()
+                if cur not in target:
+                    continue
+
+                title_raw    = ev["title"]
+                actual_raw   = ev["actual"]
+                forecast_raw = ev["forecast"]
+                previous_raw = ev["previous"]
+                impact_raw   = ev["impact"]
+
+                title    = escape(title_raw)
+                actual   = escape(actual_raw)
+                forecast = escape(forecast_raw)
+                previous = escape(previous_raw)
+                impact   = escape(impact_raw)
+                cur_disp = escape(cur)
+
+                tstr = ev["time_str"] or "—"
+
+                key = f"HTML|{cur}|{title_raw}|{tstr}|{actual_raw}"
+
+                if actual_raw and key not in seen:
+                    published.append(
+                        f"• {tstr} <b>{cur_disp}</b> {title} — "
+                        f"Actual: <b>{actual}</b> | Fcst: {forecast} | Prev: {previous} (Impact: {impact})"
+                    )
+                    seen.add(key)
+                elif not actual_raw:
+                    line = f"• {tstr} <b>{cur_disp}</b> {title}"
+                    if forecast:
+                        line += f" (Fcst: {forecast})"
+                    upcoming.append(line)
+
+            total_rel = len(published) + len(upcoming)
+            prefix = "🔎 <b>Fundament souhrn (EUR/USD/JPY) — fallback HTML</b>"
+            print(f"HTML fallback events: {total_rel}")
+        except Exception as e:
+            msg = f"❗️Calendar fetch error (both JSON & HTML): {e}"
+            print(msg)
+            send_telegram(msg)
+            sys.exit(2)
 
     # --- Sestavení zprávy (mimo smyčku) ---
     lines = [
-        f"🔎 <b>Fundament souhrn (EUR/USD/JPY)</b>",
-        f"Feed items: <code>{len(feed)}</code> | Relevant (EUR/USD/JPY): <code>{total_rel}</code>",
+        prefix,
+        f"Feed items: <code>{len(feed) if json_ok else 'n/a'}</code> | Relevant (EUR/USD/JPY): <code>{total_rel}</code>",
         f"Dnes zveřejněno: <code>{len(published)}</code> | Dnes ještě přijde: <code>{len(upcoming)}</code>",
     ]
 
