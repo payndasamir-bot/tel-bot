@@ -11,9 +11,13 @@ SEEN_FILE = os.path.join("data", "seen.json")
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TG_BOT_TOKEN")
 CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID")   or os.getenv("TG_CHAT_ID")
 
-PRIMARY_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+PRIMARY_URLS = [
+    "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
+    "https://nfs.faireconomy.media/ff_calendar_lastweek.json",
+]
 ALT_URLS = [
     "https://cdn-nfs.faireconomy.media/ff_calendar_thisweek.json",
+    "https://cdn-nfs.faireconomy.media/ff_calendar_lastweek.json",
 ]
 
 HEADERS = {
@@ -75,37 +79,50 @@ def send_telegram(text: str):
     except Exception as e:
         print("Telegram exception:", e)
 
-# ---------- JSON feed (primary) ----------
-def fetch_feed_json():
-    """Stáhne JSON feed s hlavičkami + retry (řeší 403)"""
-    urls = [PRIMARY_URL] + ALT_URLS
+# ---------- JSON feed (thisweek + lastweek) ----------
+def fetch_one(url):
     last_err = None
-    for url in urls:
-        for attempt in range(3):
-            try:
-                r = requests.get(
-                    url,
-                    headers=HEADERS,
-                    params={"_": int(time.time())},  # cache buster
-                    timeout=20,
-                )
-                if r.status_code >= 400:
-                    raise requests.HTTPError(f"{r.status_code} {r.reason}")
-                return r.json()
-            except Exception as e:
-                last_err = e
-                wait = 1 + attempt
-                print(f"fetch attempt {attempt+1} for {url} failed: {e}; retry in {wait}s")
-                time.sleep(wait)
+    for attempt in range(3):
+        try:
+            r = requests.get(
+                url, headers=HEADERS,
+                params={"_": int(time.time())},  # cache buster
+                timeout=20
+            )
+            if r.status_code >= 400:
+                raise requests.HTTPError(f"{r.status_code} {r.reason}")
+            return r.json()
+        except Exception as e:
+            last_err = e
+            wait = 1 + attempt
+            print(f"fetch {url} attempt {attempt+1} failed: {e}; retry {wait}s")
+            time.sleep(wait)
     raise last_err
+
+def fetch_feeds_merged():
+    """Stáhne thisweek + lastweek (včetně CDN alternativ), vrátí sloučený list."""
+    feeds = []
+    urls = PRIMARY_URLS + ALT_URLS
+    seen_url_ok = set()
+    for url in urls:
+        base = url.rsplit("/", 1)[-1]  # jen jméno souboru
+        if base in seen_url_ok:
+            continue
+        try:
+            data = fetch_one(url)
+            if isinstance(data, list) and data:
+                feeds.extend(data)
+                seen_url_ok.add(base)
+        except Exception as e:
+            print("WARN:", e)
+    return feeds
 
 def to_local(ts: int) -> datetime.datetime:
     """Timestamp (UTC) -> lokální aware datetime."""
     return datetime.datetime.fromtimestamp(int(ts), datetime.timezone.utc).astimezone(TZ_LOCAL)
 
-# ---------- HTML fallback (when JSON blocked) ----------
+# ---------- HTML fallback (when JSON blocked completely) ----------
 def fetch_today_html_events():
-    """Scrape ForexFactory calendar ?day=today (fallback). Časy jsou dle FF stránky (bez přesného TZ)."""
     url = "https://www.forexfactory.com/calendar?day=today"
     r = requests.get(url, headers=HTML_HEADERS, timeout=25)
     if r.status_code >= 400:
@@ -154,30 +171,29 @@ def main():
     target = pairs_to_currencies(pairs)  # {'EUR','USD','JPY'}
     print("Target currencies:", sorted(target))
 
-    # Lokální "teď" a okno souhrnu
     now_local   = datetime.datetime.now(TZ_LOCAL)
     today_local = now_local.date()
     lookback_days = max(1, int(args.lookback))
     from_date = today_local - datetime.timedelta(days=lookback_days)
     today_end = datetime.datetime.combine(today_local, datetime.time(23, 59, 59), tzinfo=TZ_LOCAL)
+    next_48h_end = now_local + datetime.timedelta(hours=48)
 
-    # 1) Zkus JSON feed
-    feed = None
+    # 1) Zkus JSON feeds (thisweek + lastweek)
+    feed = []
     json_ok = False
     try:
-        feed = fetch_feed_json()
-        json_ok = True
+        feed = fetch_feeds_merged()
+        json_ok = len(feed) > 0
     except Exception as e:
-        print("JSON feed failed:", e)
+        print("JSON feeds failed:", e)
 
     seen = load_seen()
     published = []
     upcoming  = []
     total_rel = 0
 
-    if json_ok and isinstance(feed, list):
-        print("Feed items:", len(feed))
-        # --- zpracování JSON feedu (v lokálním čase) ---
+    if json_ok:
+        print("Feed items merged:", len(feed))
         for ev in feed:
             cur = (ev.get("country") or "").upper()
             if cur not in target:
@@ -188,11 +204,11 @@ def main():
                 continue
             dt = to_local(ts)  # UTC -> lokální
 
-            # filtr: posledních X dní (včetně dneška)
+            # filtr na okno posledních X dnů (včetně dneška)
             if not (from_date <= dt.date() <= today_local):
-                continue
-
-            total_rel += 1
+                # ale pro "upcoming 48h" chceme i zítřek/pozítří
+                if not (now_local <= dt <= next_48h_end):
+                    continue
 
             title_raw    = (ev.get("title") or "").strip()
             actual_raw   = str(ev.get("actual") or "").strip()
@@ -207,27 +223,35 @@ def main():
             impact   = escape(impact_raw)
             cur_disp = escape(cur)
 
+            # published, když máme nějaký "actual" (ne prázdná/placeholder hodnota)
             is_actual = actual_raw not in {"", "-", "—", "N/A", "na", "NaN"}
 
-            key = f"{cur}|{title_raw}|{ts}|{actual_raw}"
+            # do published jen události v lookback okně
+            if (from_date <= dt.date() <= today_local) and is_actual:
+                key = f"{cur}|{title_raw}|{ts}|{actual_raw}"
+                if key not in seen:
+                    published.append(
+                        f"• {dt.strftime('%Y-%m-%d %H:%M')} <b>{cur_disp}</b> {title} — "
+                        f"Actual: <b>{actual}</b> | Fcst: {forecast} | Prev: {previous} (Impact: {impact})"
+                    )
+                    seen.add(key)
+                total_rel += 1
+                continue
 
-            if is_actual and key not in seen:
-                published.append(
-                    f"• {dt.strftime('%Y-%m-%d %H:%M')} <b>{cur_disp}</b> {title} — "
-                    f"Actual: <b>{actual}</b> | Fcst: {forecast} | Prev: {previous} (Impact: {impact})"
-                )
-                seen.add(key)
-
-            elif (not is_actual) and (dt >= now_local) and (dt <= today_end):
+            # do upcoming bereme nejbližších 48 h (i když nejsou v lookback okně)
+            if now_local <= dt <= next_48h_end and (not is_actual):
                 line = f"• {dt.strftime('%Y-%m-%d %H:%M')} <b>{cur_disp}</b> {title}"
                 if forecast:
                     line += f" (Fcst: {forecast})"
                 upcoming.append(line)
+                total_rel += 1
 
+        # seřaď upcoming podle času (pro jistotu)
+        upcoming.sort()
         prefix = "🔎 <b>Fundament souhrn (EUR/USD/JPY)</b>"
         window_text = f"{from_date.strftime('%Y-%m-%d')} → {today_local.strftime('%Y-%m-%d')}"
     else:
-        # 2) Fallback: HTML scraping „today“ (bez přesného TZ – orientačně, pouze dnešek)
+        # 2) Fallback: HTML scraping „today“ (orientačně)
         try:
             html_events = fetch_today_html_events()
             for ev in html_events:
@@ -248,7 +272,6 @@ def main():
                 impact   = escape(impact_raw)
                 cur_disp = escape(cur)
 
-                # HTML fallback nemá přesné datum – bereme jen dnešek
                 is_actual = actual_raw not in {"", "-", "—", "N/A", "na", "NaN"}
                 tstr = ev["time_str"] or "—"
 
@@ -276,12 +299,12 @@ def main():
             send_telegram(msg)
             sys.exit(2)
 
-    # --- Sestavení zprávy (mimo smyčku) ---
+    # --- Sestavení zprávy ---
     lines = [
         prefix,
         f"Období: <code>{window_text}</code>",
-        f"Feed items: <code>{len(feed) if json_ok else 'n/a'}</code> | Relevant (EUR/USD/JPY): <code>{total_rel}</code>",
-        f"Zveřejněno v období: <code>{len(published)}</code> | Ještě přijde dnes: <code>{len(upcoming)}</code>",
+        f"Sloučený feed items: <code>{len(feed) if json_ok else 'n/a'}</code>",
+        f"Zveřejněno v období: <code>{len(published)}</code> | Nejbližších 48 h: <code>{len(upcoming)}</code>",
     ]
 
     if published:
@@ -290,8 +313,9 @@ def main():
         if len(published) > 25:
             lines.append(f"… a dalších {len(published)-25}")
 
+    # Když není nic zveřejněného, pošli aspoň přehled na 48 h
     if upcoming:
-        lines.append("\n⏳ <b>Dnes ještě přijde</b>")
+        lines.append("\n⏳ <b>Nejbližších 48 h</b>")
         lines.extend(upcoming[:20])
         if len(upcoming) > 20:
             lines.append(f"… a dalších {len(upcoming)-20}")
@@ -302,5 +326,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 
