@@ -143,6 +143,8 @@ def fetch_today_html_events():
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--pairs", type=str, default=os.getenv("PAIRS", "EURUSD,USDJPY"))
+    parser.add_argument("--lookback", type=int, default=int(os.getenv("LOOKBACK_DAYS", "7")),
+                        help="Počet dnů zpětně pro souhrn (default 7).")
     args = parser.parse_args()
 
     pairs = [p.strip() for p in args.pairs.split(",") if p.strip()]
@@ -152,11 +154,12 @@ def main():
     target = pairs_to_currencies(pairs)  # {'EUR','USD','JPY'}
     print("Target currencies:", sorted(target))
 
-    # Lokální "teď" a hranice dne [start, end)
+    # Lokální "teď" a okno souhrnu
     now_local   = datetime.datetime.now(TZ_LOCAL)
     today_local = now_local.date()
-    today_start = datetime.datetime.combine(today_local, datetime.time(0, 0), tzinfo=TZ_LOCAL)
-    today_end   = today_start + datetime.timedelta(days=1)
+    lookback_days = max(1, int(args.lookback))
+    from_date = today_local - datetime.timedelta(days=lookback_days)
+    today_end = datetime.datetime.combine(today_local, datetime.time(23, 59, 59), tzinfo=TZ_LOCAL)
 
     # 1) Zkus JSON feed
     feed = None
@@ -179,12 +182,17 @@ def main():
             cur = (ev.get("country") or "").upper()
             if cur not in target:
                 continue
-            total_rel += 1
 
             ts = ev.get("timestamp")
             if not ts:
                 continue
             dt = to_local(ts)  # UTC -> lokální
+
+            # filtr: posledních X dní (včetně dneška)
+            if not (from_date <= dt.date() <= today_local):
+                continue
+
+            total_rel += 1
 
             title_raw    = (ev.get("title") or "").strip()
             actual_raw   = str(ev.get("actual") or "").strip()
@@ -199,31 +207,27 @@ def main():
             impact   = escape(impact_raw)
             cur_disp = escape(cur)
 
-            # *** dnešek podle lokálního intervalu ***
-            if not (today_start <= dt < today_end):
-                continue
-
-            # některé feedy dávají "-" / "—" / "N/A" atd.
             is_actual = actual_raw not in {"", "-", "—", "N/A", "na", "NaN"}
 
             key = f"{cur}|{title_raw}|{ts}|{actual_raw}"
 
             if is_actual and key not in seen:
                 published.append(
-                    f"• {dt.strftime('%H:%M')} <b>{cur_disp}</b> {title} — "
+                    f"• {dt.strftime('%Y-%m-%d %H:%M')} <b>{cur_disp}</b> {title} — "
                     f"Actual: <b>{actual}</b> | Fcst: {forecast} | Prev: {previous} (Impact: {impact})"
                 )
                 seen.add(key)
 
-            elif (not is_actual) and (dt >= now_local):
-                line = f"• {dt.strftime('%H:%M')} <b>{cur_disp}</b> {title}"
+            elif (not is_actual) and (dt >= now_local) and (dt <= today_end):
+                line = f"• {dt.strftime('%Y-%m-%d %H:%M')} <b>{cur_disp}</b> {title}"
                 if forecast:
                     line += f" (Fcst: {forecast})"
                 upcoming.append(line)
 
         prefix = "🔎 <b>Fundament souhrn (EUR/USD/JPY)</b>"
+        window_text = f"{from_date.strftime('%Y-%m-%d')} → {today_local.strftime('%Y-%m-%d')}"
     else:
-        # 2) Fallback: HTML scraping „today“ (bez přesného TZ – orientačně)
+        # 2) Fallback: HTML scraping „today“ (bez přesného TZ – orientačně, pouze dnešek)
         try:
             html_events = fetch_today_html_events()
             for ev in html_events:
@@ -244,27 +248,27 @@ def main():
                 impact   = escape(impact_raw)
                 cur_disp = escape(cur)
 
-                tstr = ev["time_str"] or "—"
-
-                # stejné pravidlo is_actual i pro HTML fallback
+                # HTML fallback nemá přesné datum – bereme jen dnešek
                 is_actual = actual_raw not in {"", "-", "—", "N/A", "na", "NaN"}
+                tstr = ev["time_str"] or "—"
 
                 key = f"HTML|{cur}|{title_raw}|{tstr}|{actual_raw}"
 
                 if is_actual and key not in seen:
                     published.append(
-                        f"• {tstr} <b>{cur_disp}</b> {title} — "
+                        f"• {today_local} {tstr} <b>{cur_disp}</b> {title} — "
                         f"Actual: <b>{actual}</b> | Fcst: {forecast} | Prev: {previous} (Impact: {impact})"
                     )
                     seen.add(key)
                 elif not is_actual:
-                    line = f"• {tstr} <b>{cur_disp}</b> {title}"
+                    line = f"• {today_local} {tstr} <b>{cur_disp}</b> {title}"
                     if forecast:
                         line += f" (Fcst: {forecast})"
                     upcoming.append(line)
 
             total_rel = len(published) + len(upcoming)
             prefix = "🔎 <b>Fundament souhrn (EUR/USD/JPY) — fallback HTML</b>"
+            window_text = f"{today_local.strftime('%Y-%m-%d')} (dnešek)"
             print(f"HTML fallback events: {total_rel}")
         except Exception as e:
             msg = f"❗️Calendar fetch error (both JSON & HTML): {e}"
@@ -275,15 +279,16 @@ def main():
     # --- Sestavení zprávy (mimo smyčku) ---
     lines = [
         prefix,
+        f"Období: <code>{window_text}</code>",
         f"Feed items: <code>{len(feed) if json_ok else 'n/a'}</code> | Relevant (EUR/USD/JPY): <code>{total_rel}</code>",
-        f"Dnes zveřejněno: <code>{len(published)}</code> | Dnes ještě přijde: <code>{len(upcoming)}</code>",
+        f"Zveřejněno v období: <code>{len(published)}</code> | Ještě přijde dnes: <code>{len(upcoming)}</code>",
     ]
 
     if published:
-        lines.append("\n📢 <b>Zveřejněno dnes</b>")
-        lines.extend(published[:20])
-        if len(published) > 20:
-            lines.append(f"… a dalších {len(published)-20}")
+        lines.append("\n📢 <b>Zveřejněno</b>")
+        lines.extend(published[:25])
+        if len(published) > 25:
+            lines.append(f"… a dalších {len(published)-25}")
 
     if upcoming:
         lines.append("\n⏳ <b>Dnes ještě přijde</b>")
