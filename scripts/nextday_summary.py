@@ -115,6 +115,11 @@ def main():
             feed_merged.extend(data)
 
     print("Feed items merged:", len(feed_merged))
+    # --- DEBUG počitadla -----------------------------------------------
+    dbg_total = dbg_cur = dbg_window = 0
+    dbg_examples = []
+    # -------------------------------------------------------------------
+
 
     # ---- výběr událostí ----
     occurred = []   # proběhlo v posledních 7 dnech
@@ -122,14 +127,39 @@ def main():
     relevant_count = 0
 
     for ev in feed_merged:
+        dbg_total += 1
         cur = (ev.get("country") or "").upper()
         if cur not in target:
             continue
+        dbg_cur += 1
 
         ts = ev.get("timestamp")
         if not ts:
             continue
+         if from_date <= dt.date() <= today_local:
+        dbg_window += 1
+        if len(dbg_examples) < 5:
+            dbg_examples.append(
+            f"{dt.strftime('%Y-%m-%d %H:%M')} {cur} {(ev.get('title') or '').strip()} "
+            f"| act='{str(ev.get('actual') or '').strip()}' fc='{str(ev.get('forecast') or '').strip()}'"
+        )
+   
         dt = to_local(ts)  # lokální čas
+
+        print(
+            "DEBUG:",
+            f"total={dbg_total}",
+            f"in_currency={dbg_cur}",
+            f"in_window={dbg_window}",
+            f"from={from_date} to={today_local}",
+            f"now={now_local.strftime('%Y-%m-%d %H:%M')}",
+                )
+        if dbg_examples:
+            print("DEBUG examples (first matches in window):")
+        for ex in dbg_examples:
+            print("  -", ex)
+        else:
+            print("DEBUG examples: none matched the window")
 
         # základní pole
         title_raw    = (ev.get("title") or "").strip()
