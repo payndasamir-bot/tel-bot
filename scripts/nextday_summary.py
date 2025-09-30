@@ -152,9 +152,11 @@ def main():
     target = pairs_to_currencies(pairs)  # {'EUR','USD','JPY'}
     print("Target currencies:", sorted(target))
 
-    # Lokální "teď" a dnešní datum
-    now_local = datetime.datetime.now(TZ_LOCAL)
+    # Lokální "teď" a hranice dne [start, end)
+    now_local   = datetime.datetime.now(TZ_LOCAL)
     today_local = now_local.date()
+    today_start = datetime.datetime.combine(today_local, datetime.time(0, 0), tzinfo=TZ_LOCAL)
+    today_end   = today_start + datetime.timedelta(days=1)
 
     # 1) Zkus JSON feed
     feed = None
@@ -182,7 +184,7 @@ def main():
             ts = ev.get("timestamp")
             if not ts:
                 continue
-            dt = to_local(ts)
+            dt = to_local(ts)  # UTC -> lokální
 
             title_raw    = (ev.get("title") or "").strip()
             actual_raw   = str(ev.get("actual") or "").strip()
@@ -197,20 +199,23 @@ def main():
             impact   = escape(impact_raw)
             cur_disp = escape(cur)
 
-            # *** KLÍČOVÉ: dnes podle lokálního data ***
-            if dt.date() != today_local:
+            # *** dnešek podle lokálního intervalu ***
+            if not (today_start <= dt < today_end):
                 continue
+
+            # některé feedy dávají "-" / "—" / "N/A" atd.
+            is_actual = actual_raw not in {"", "-", "—", "N/A", "na", "NaN"}
 
             key = f"{cur}|{title_raw}|{ts}|{actual_raw}"
 
-            if actual_raw and key not in seen:
+            if is_actual and key not in seen:
                 published.append(
                     f"• {dt.strftime('%H:%M')} <b>{cur_disp}</b> {title} — "
                     f"Actual: <b>{actual}</b> | Fcst: {forecast} | Prev: {previous} (Impact: {impact})"
                 )
                 seen.add(key)
 
-            elif not actual_raw and dt >= now_local:
+            elif (not is_actual) and (dt >= now_local):
                 line = f"• {dt.strftime('%H:%M')} <b>{cur_disp}</b> {title}"
                 if forecast:
                     line += f" (Fcst: {forecast})"
@@ -241,15 +246,18 @@ def main():
 
                 tstr = ev["time_str"] or "—"
 
+                # stejné pravidlo is_actual i pro HTML fallback
+                is_actual = actual_raw not in {"", "-", "—", "N/A", "na", "NaN"}
+
                 key = f"HTML|{cur}|{title_raw}|{tstr}|{actual_raw}"
 
-                if actual_raw and key not in seen:
+                if is_actual and key not in seen:
                     published.append(
                         f"• {tstr} <b>{cur_disp}</b> {title} — "
                         f"Actual: <b>{actual}</b> | Fcst: {forecast} | Prev: {previous} (Impact: {impact})"
                     )
                     seen.add(key)
-                elif not actual_raw:
+                elif not is_actual:
                     line = f"• {tstr} <b>{cur_disp}</b> {title}"
                     if forecast:
                         line += f" (Fcst: {forecast})"
