@@ -126,40 +126,52 @@ def main():
     upcoming = []   # přijde do 48 hodin
     relevant_count = 0
 
-    for ev in feed_merged:
-        dbg_total += 1
-        cur = (ev.get("country") or "").upper()
-        if cur not in target:
-            continue
-        dbg_cur += 1
+    # --- DEBUG COUNTERS ---
+dbg_total = 0
+dbg_cur = 0
+dbg_window = 0
+dbg_examples = []
 
-        ts = ev.get("timestamp")
-        if not ts:
-            continue
-         if from_date <= dt.date() <= today_local:
+for ev in feed_merged:
+    dbg_total += 1
+
+    cur = (ev.get("country") or "").upper()
+    if cur not in target:
+        continue
+    dbg_cur += 1
+
+    ts = ev.get("timestamp")
+    if not ts:
+        continue
+
+    dt = to_local(ts)  # -> lokální datetime
+
+    # jen čítač + pár ukázek eventů, které spadají do okna
+    if from_date <= dt.date() <= today_local:
         dbg_window += 1
         if len(dbg_examples) < 5:
             dbg_examples.append(
-            f"{dt.strftime('%Y-%m-%d %H:%M')} {cur} {(ev.get('title') or '').strip()} "
-            f"| act='{str(ev.get('actual') or '').strip()}' fc='{str(ev.get('forecast') or '').strip()}'"
-        )
-   
-        dt = to_local(ts)  # lokální čas
+                f"{dt.strftime('%Y-%m-%d %H:%M')} {cur} {(ev.get('title') or '').strip()} "
+                f"| act='{str(ev.get('actual') or '').strip()}' "
+                f"fc='{str(ev.get('forecast') or '').strip()}'"
+            )
 
-        print(
-            "DEBUG:",
-            f"total={dbg_total}",
-            f"in_currency={dbg_cur}",
-            f"in_window={dbg_window}",
-            f"from={from_date} to={today_local}",
-            f"now={now_local.strftime('%Y-%m-%d %H:%M')}",
-                )
-        if dbg_examples:
-            print("DEBUG examples (first matches in window):")
-        for ex in dbg_examples:
-            print("  -", ex)
-        else:
-            print("DEBUG examples: none matched the window")
+# --- DEBUG PRINT (mimo smyčku, stejné odsazení jako 'for') ---
+print(
+    "DEBUG:",
+    f"total={dbg_total}",
+    f"in_currency={dbg_cur}",
+    f"in_window={dbg_window}",
+    f"from={from_date} to={today_local}",
+    f"now={now_local.strftime('%Y-%m-%d %H:%M')}",
+    sep="\n"
+)
+if dbg_examples:
+    print("DEBUG examples (first matches in window):")
+    for ex in dbg_examples:
+        print("  -", ex)
+else:
+    print("DEBUG examples: none matched the window")
 
         # základní pole
         title_raw    = (ev.get("title") or "").strip()
