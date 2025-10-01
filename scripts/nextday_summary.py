@@ -3,7 +3,7 @@ import os, sys, json, argparse, datetime, time
 import requests
 from html import escape
 from zoneinfo import ZoneInfo
-FORCE_PROBE = True  # <- DOČASNĚ: po ověření přepni na False nebo řádek smaž
+FORCE_PROBE = False  # <- DOČASNĚ: po ověření přepni na False nebo řádek smaž
 
 # ============ Konfigurace ============
 
