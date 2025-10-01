@@ -105,10 +105,14 @@ def main():
     target = pairs_to_currencies(pairs)  # např. {'EUR','USD','JPY'}
     print("Cílové měny:", sorted(target))
 
-    now_local   = datetime.datetime.now(TZ_LOCAL)
-    today_local = now_local.date()
-    from_date   = today_local - datetime.timedelta(days=7)   # lookback 7 dní
-    horizon_end = now_local + datetime.timedelta(hours=48)   # výhled 48 hodin
+     # --- časové okno ---
+     LOOKBACK_DAYS = 30       # dočasně zvětšeno pro test
+     AHEAD_HOURS   = 168      # dočasně zvětšeno na týden dopředu
+
+     now_local   = datetime.datetime.now(TZ_LOCAL)
+     today_local = now_local.date()
+     from_date   = today_local - datetime.timedelta(days=LOOKBACK_DAYS)
+     horizon_end = now_local + datetime.timedelta(hours=AHEAD_HOURS)
 
     # ---- načtení a sloučení feedů ----
     feed_merged = []
