@@ -3,6 +3,7 @@ import os, sys, json, argparse, datetime, time
 import requests
 from html import escape
 from zoneinfo import ZoneInfo
+FORCE_PROBE = True  # <- DOČASNĚ: po ověření přepni na False nebo řádek smaž
 
 # ============ Konfigurace ============
 
@@ -117,6 +118,49 @@ def main():
             feed_merged.extend(data)
 
     print("Feed items merged:", len(feed_merged))
+        # === PROBE mód: pošli syrové ukázky bez filtrů, ať vidíme, že data tečou ===
+    if FORCE_PROBE:
+        countries = {}
+        examples = []
+        for ev in feed_merged:
+            cur = (ev.get("country") or "").upper()
+            countries[cur] = countries.get(cur, 0) + 1
+
+            ts = ev.get("timestamp")
+            if ts:
+                dt = to_local(ts)
+                time_str = dt.strftime("%Y-%m-%d %H:%M")
+            else:
+                time_str = "—"
+
+            if len(examples) < 10:  # pošli prvních 10 pro ochutnávku
+                examples.append(
+                    f"• {time_str} <b>{escape(cur)}</b> "
+                    f"{escape((ev.get('title') or '').strip())} | "
+                    f"act=<b>{escape(str(ev.get('actual') or '').strip())}</b> "
+                    f"fcst={escape(str(ev.get('forecast') or '').strip())}"
+                )
+
+        # top 10 zemí podle počtu
+        top_countries = sorted(countries.items(), key=lambda x: x[1], reverse=True)[:10]
+        top_str = ", ".join([f"{c}:{n}" for c, n in top_countries]) if top_countries else "—"
+
+        msg = [
+            "🧪 <b>PROBE: syrový výpis z feedu</b>",
+            f"Feedů sloučeno: <code>{len(feed_merged)}</code>",
+            f"Počty podle zemí (Top10): {top_str}",
+        ]
+        if examples:
+            msg.append("\n📋 <b>Příklady položek</b>")
+            msg.extend(examples)
+        else:
+            msg.append("\n⚠️ Žádné položky k ukázce.")
+
+        send_telegram("\n".join(msg))
+        print("PROBE done, exiting early.")
+        return
+   
+    
 
     # ---- zpracování ----
     occurred = []            # co proběhlo v lookback okně
