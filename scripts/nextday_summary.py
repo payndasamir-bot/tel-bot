@@ -106,13 +106,13 @@ def main():
     print("Cílové měny:", sorted(target))
 
      # --- časové okno ---
-     LOOKBACK_DAYS = 30       # dočasně zvětšeno pro test
-     AHEAD_HOURS   = 168      # dočasně zvětšeno na týden dopředu
-
-     now_local   = datetime.datetime.now(TZ_LOCAL)
-     today_local = now_local.date()
-     from_date   = today_local - datetime.timedelta(days=LOOKBACK_DAYS)
-     horizon_end = now_local + datetime.timedelta(hours=AHEAD_HOURS)
+    LOOKBACK_DAYS = 30       # dočasně zvětšeno pro test
+    AHEAD_HOURS   = 168      # dočasně zvětšeno na týden dopředu
+    
+    now_local   = datetime.datetime.now(TZ_LOCAL)
+    today_local = now_local.date()
+    from_date   = today_local - datetime.timedelta(days=LOOKBACK_DAYS)
+    horizon_end = now_local + datetime.timedelta(hours=AHEAD_HOURS)
 
     # ---- načtení a sloučení feedů ----
     feed_merged = []
