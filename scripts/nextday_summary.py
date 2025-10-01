@@ -107,26 +107,20 @@ def main():
     from_date   = today_local - datetime.timedelta(days=LOOKBACK_DAYS)
     upto_local  = now_local + datetime.timedelta(hours=UPCOMING_HOURS)
 
-    # ---- načtení a sloučení feedů ----
-    feed_merged = []
-    for url in FEEDS:
-        data = fetch_json(url)
-        if isinstance(data, list):
-            feed_merged.extend(data)
+   # ---- načtení a sloučení feedů ----
+feed_merged = []
+for url in FEEDS:
+    data = fetch_json(url)
+    if isinstance(data, list):
+        feed_merged.extend(data)
 
-    print("Feed items merged:", len(feed_merged))
-    # --- DEBUG počitadla -----------------------------------------------
-    dbg_total = dbg_cur = dbg_window = 0
-    dbg_examples = []
-    # -------------------------------------------------------------------
+print("Feed items merged:", len(feed_merged))
 
+# ---- DEBUG + sestavení výstupů ----
+occurred = []            # to, co už proběhlo v lookback okně
+upcoming = []            # co teprve přijde (dnes+zítra)
+relevant_in_window = 0   # počet položek uvnitř okna
 
-    # ---- výběr událostí ----
-    occurred = []   # proběhlo v posledních 7 dnech
-    upcoming = []   # přijde do 48 hodin
-    relevant_count = 0
-
-    # --- DEBUG COUNTERS ---
 dbg_total = 0
 dbg_cur = 0
 dbg_window = 0
@@ -144,9 +138,10 @@ for ev in feed_merged:
     if not ts:
         continue
 
-    dt = to_local(ts)  # -> lokální datetime
+    # lokální čas události
+    dt = to_local(ts)
 
-    # jen čítač + pár ukázek eventů, které spadají do okna
+    # jen pro rychlou diagnostiku – pár ukázkových událostí, které spadají do okna
     if from_date <= dt.date() <= today_local:
         dbg_window += 1
         if len(dbg_examples) < 5:
@@ -156,7 +151,41 @@ for ev in feed_merged:
                 f"fc='{str(ev.get('forecast') or '').strip()}'"
             )
 
-# --- DEBUG PRINT (mimo smyčku, stejné odsazení jako 'for') ---
+    # ---- klasifikace: publication / upcoming ----
+    title_raw    = (ev.get("title") or "").strip()
+    actual_raw   = str(ev.get("actual") or "").strip()
+    forecast_raw = str(ev.get("forecast") or "").strip()
+    previous_raw = str(ev.get("previous") or "").strip()
+    impact_raw   = str(ev.get("impact") or "").strip()
+
+    title    = escape(title_raw)
+    actual   = escape(actual_raw)
+    forecast = escape(forecast_raw)
+    previous = escape(previous_raw)
+    impact   = escape(impact_raw)
+    cur_disp = escape(cur)
+
+    # 1) Už proběhlo v lookback okně (bez podmínky na 'actual')
+    if from_date <= dt.date() <= today_local and dt <= now_local:
+        relevant_in_window += 1
+        line = f"• {dt.strftime('%Y-%m-%d %H:%M')} <b>{cur_disp}</b> {title}"
+        detail = []
+        if actual:   detail.append(f"Actual: <b>{actual}</b>")
+        if forecast: detail.append(f"Fcst: {forecast}")
+        if previous: detail.append(f"Prev: {previous}")
+        if impact:   detail.append(f"(Impact: {impact})")
+        if detail:
+            line += " — " + " | ".join(detail)
+        occurred.append(line)
+
+    # 2) Přijde dnes/zítra
+    elif today_local <= dt.date() <= (today_local + datetime.timedelta(days=2)) and dt > now_local:
+        line = f"• {dt.strftime('%Y-%m-%d %H:%M')} <b>{cur_disp}</b> {title}"
+        if forecast:
+            line += f" (Fcst: {forecast})"
+        upcoming.append(line)
+
+# ---- DEBUG výpis (mimo smyčku!) ----
 print(
     "DEBUG:",
     f"total={dbg_total}",
@@ -172,6 +201,9 @@ if dbg_examples:
         print("  -", ex)
 else:
     print("DEBUG examples: none matched the window")
+
+# ---- DÁL už pokračuje původní skládání zprávy ----
+# (tj. následuje tvé `lines = [` a vše pod tím)
 
         # základní pole
         title_raw    = (ev.get("title") or "").strip()
