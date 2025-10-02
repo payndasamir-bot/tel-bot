@@ -94,7 +94,17 @@ def fetch_json_from_hosts(path: str):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--pairs", type=str, default=os.getenv("PAIRS", "EURUSD,USDJPY"))
+    parser.add_argument(
+        "--pairs", type=str, default=os.getenv("PAIRS", "EURUSD,USDJPY")
+    )
+    parser.add_argument(
+        "--from", dest="from_date", type=str, default=None,
+        help="Začátek období (YYYY-MM-DD)"
+    )
+    parser.add_argument(
+        "--to", dest="to_date", type=str, default=None,
+        help="Konec období včetně (YYYY-MM-DD)"
+    )
     args = parser.parse_args()
 
     pairs = [p.strip() for p in args.pairs.split(",") if p.strip()]
@@ -106,14 +116,29 @@ def main():
     print("Cílové měny:", sorted(target))
 
      # --- časové okno ---
-    LOOKBACK_DAYS = 30       # dočasně zvětšeno pro test
-    AHEAD_HOURS   = 168      # dočasně zvětšeno na týden dopředu
-    
+       # --- časové okno ---
+    def _parse_date(s: str) -> datetime.date:
+        return datetime.date.fromisoformat(s)
+
+    LOOKBACK_DAYS = 7
+    AHEAD_HOURS   = 48
+
     now_local   = datetime.datetime.now(TZ_LOCAL)
     today_local = now_local.date()
-    from_date   = today_local - datetime.timedelta(days=LOOKBACK_DAYS)
-    horizon_end = now_local + datetime.timedelta(hours=AHEAD_HOURS)
 
+    if args.from_date and args.to_date:
+        from_date = _parse_date(args.from_date)
+        to_date   = _parse_date(args.to_date)
+        if from_date > to_date:
+            from_date, to_date = to_date, from_date
+        horizon_end = datetime.datetime.combine(
+            to_date, datetime.time(23, 59), tzinfo=TZ_LOCAL
+        )
+    else:
+        from_date   = today_local - datetime.timedelta(days=LOOKBACK_DAYS)
+        to_date     = today_local
+        horizon_end = now_local + datetime.timedelta(hours=AHEAD_HOURS)
+        
     # ---- načtení a sloučení feedů ----
     feed_merged = []
     for path in FEED_PATHS:
