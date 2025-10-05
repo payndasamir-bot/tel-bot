@@ -2,9 +2,11 @@
 # -*- coding: utf-8 -*-
 """
 Fundament souhrn pro vybrané páry (např. EURUSD, USDJPY) z FF JSON feedu
-+ komentáře "podle PDF" (inflace, GDP, PMI, trh práce, retail, sazby…)
-+ mírná preference novějších dat (recency weight)
-+ hezký výstup do Telegramu
++ KOMPLETNÍ výpis všech událostí (nezkracuje)
++ barvy podle směru (🟢 bullish, 🔴 bearish, ⚪️ neutral)
++ komentáře "podle PDF" (inflace, HDP, PMI, trh práce, retail, sazby…)
++ váha podle impactu i stáří (recency)
++ výstup do Telegramu
 
 ENV:
   TELEGRAM_BOT_TOKEN / TG_BOT_TOKEN
@@ -38,7 +40,7 @@ HEADERS = {
     "Cache-Control": "no-cache",
 }
 
-# ============ drobné UI ============
+# ============ UI ============
 def impact_badge(impact_raw: str) -> str:
     s = (impact_raw or "").strip().lower()
     if "high" in s:   return "🔴 High"
@@ -53,7 +55,7 @@ def _verdict(sig: int) -> str:
     return "Bullish" if sig > 0 else ("Bearish" if sig < 0 else "Neutral")
 
 def fmt_pair_score(pair: str, val: float) -> str:
-    v = f"{val:+.1f}" if isinstance(val, float) else f"{val:+d}"
+    v = f"{val:+.1f}"
     if val > 0:  return f"{pair}: {v} 🟢↑"
     if val < 0:  return f"{pair}: {v} 🔴↓"
     return f"{pair}: +0.0 ⚪️→"
@@ -81,15 +83,15 @@ def _to_float(x) -> float | None:
 def _event_type(title: str) -> str:
     t = title.lower()
     if "cpi" in t or "inflation" in t: return "inflation"
-    if "rate" in t or "interest" in t or "press conference" in t: return "rates"
-    if "unemployment" in t or "jobless" in t or "payroll" in t or "nfp" in t or "claims" in t: return "jobs"
+    if "rate" in t or "interest" in t or "press conference" in t or "monetary" in t: return "rates"
+    if any(k in t for k in ["unemployment","jobless","payroll","nfp","claims"]): return "jobs"
     if "gdp" in t: return "gdp"
     if "retail sales" in t: return "retail"
     if "pmi" in t or "ism" in t: return "pmi"
-    if "industrial production" in t or "factory" in t or "orders" in t: return "production"
+    if any(k in t for k in ["industrial production","factory","orders"]): return "production"
     if "trade balance" in t or "current account" in t: return "trade"
-    if "sentiment" in t or "confidence" in t or "expectations" in t or "optimism" in t: return "sentiment"
-    if "housing" in t or "building permits" in t or "pending home" in t: return "housing"
+    if any(k in t for k in ["sentiment","confidence","expectations","optimism"]): return "sentiment"
+    if any(k in t for k in ["housing","building permits","pending home"]): return "housing"
     return "other"
 
 # "z PDF": vyšší je pro měnu lepší?
@@ -99,7 +101,7 @@ _HIGHER_IS_BETTER = {
     "jobs":      False,     # nižší nezaměstnanost / vyšší NFP = měna ↑
     "gdp":       True,      # vyšší růst = měna ↑
     "retail":    True,      # silnější spotřeba = měna ↑
-    "pmi":       True,      # teor.: nad/pod 50, ale zjednodušeně vyšší = lepší
+    "pmi":       True,      # 50+ expanze býčí (zjednod.: vyšší = lepší)
     "production":True,
     "trade":     True,
     "sentiment": True,
@@ -136,8 +138,8 @@ def _comment_for_event(title: str, typ: str, actual, forecast, cur: str) -> str:
     a = _to_float(actual); f = _to_float(forecast)
     if a is None or f is None:
         base = {
-            "inflation": "Inflace: vyšší = jestřábí (měna ↑, XAU ↓), nižší = holubičí (měna ↓, XAU ↑).",
-            "rates":     "Sazby/řeči: jestřábí rétorika podpírá měnu; holubičí ji oslabuje.",
+            "inflation": "Inflace: vyšší => jestřábí (měna ↑, XAU ↓), nižší => holubičí (měna ↓, XAU ↑).",
+            "rates":     "Sazby/řeč: jestřábí rétorika podpírá měnu; holubičí ji oslabuje.",
             "jobs":      "Trh práce: nižší nezaměstnanost / silné NFP býčí pro měnu.",
             "gdp":       "HDP: silnější růst býčí (měna/akcie ↑).",
             "retail":    "Maloobchod: silnější spotřeba býčí.",
@@ -154,7 +156,6 @@ def _comment_for_event(title: str, typ: str, actual, forecast, cur: str) -> str:
     if typ == "gdp":
         return f"HDP nad oček. → {cur} ↑, akcie ↑" if a>f else f"HDP pod oček. → {cur} ↓"
     if typ == "jobs":
-        # pro nezaměstnanost platí opačná logika, ale eval_signal to ošetřuje
         return f"Trh práce silnější vs. fcst → {cur} ↑" if a<f else f"Trh práce slabší → {cur} ↓"
     if typ == "retail":
         return f"Spotřeba nad oček. → {cur} ↑, akcie ↑" if a>f else f"Spotřeba pod oček. → {cur} ↓"
@@ -190,7 +191,7 @@ def send_telegram(text: str):
         "disable_web_page_preview": "true",
     }
     try:
-        r = requests.post(url, data=payload, timeout=20)
+        r = requests.post(url, data=payload, timeout=25)
         print("Telegram HTTP:", r.status_code, r.text[:200])
     except Exception as e:
         print("Telegram exception:", e)
@@ -201,7 +202,7 @@ def fetch_json_from_hosts(path: str):
         url = host.rstrip("/") + "/" + path.lstrip("/")
         for attempt in range(3):
             try:
-                r = requests.get(url, headers=HEADERS, params={"_": int(time.time())}, timeout=20)
+                r = requests.get(url, headers=HEADERS, params={"_": int(time.time())}, timeout=25)
                 if r.status_code >= 400:
                     raise requests.HTTPError(f"{r.status_code} {r.reason}")
                 data = r.json()
@@ -226,9 +227,9 @@ def _score_comment(scores: dict[str, float]) -> str:
         if v > 0:   parts.append(f"{c} posiluje")
         elif v < 0: parts.append(f"{c} oslabuje")
         else:       parts.append(f"{c} neutrální")
-    main = " | ".join(parts)
-    strongest_cur, strongest_val = max(scores.items(), key=lambda kv: abs(kv[1])) if scores else ("—",0)
-    if abs(strongest_val) == 0:
+    main = " | ".join(parts) if parts else "Bez dat."
+    strongest_cur, strongest_val = max(scores.items(), key=lambda kv: abs(kv[1])) if scores else ("—",0.0)
+    if abs(stro ngest_val) == 0:
         detail = "Zatím bez zveřejněných hodnot; čeká se na data."
     else:
         detail = f"Nejsilnější signál: {strongest_cur} ({strongest_val:+.1f})."
@@ -307,9 +308,11 @@ def main():
         previous_raw = str(ev.get("previous") or "").strip()
         impact_raw   = str(ev.get("impact")   or "").strip()
 
+        typ = _event_type(title_raw)
         has_actual = actual_raw not in {"", "-", "—", "N/A", "na", "NaN"}
 
         if has_actual:
+            # směrový signál + váhy
             sig    = eval_signal(title_raw, actual_raw, forecast_raw)   # -1/0/+1
             w_imp  = _impact_weight(impact_raw)
             w_rec  = _recency_weight(ts)
@@ -321,8 +324,9 @@ def main():
                 if cur == base:  pair_scores[pr] += cur_gain
                 elif cur == quote: pair_scores[pr] -= cur_gain
 
-            typ = _event_type(title_raw)
+            # komentář podle PDF
             pdf_note = _comment_for_event(title_raw, typ, actual_raw, forecast_raw, cur)
+            arrow = "🟢" if sig > 0 else ("🔴" if sig < 0 else "⚪️")
 
             published.append(
                 "• "
@@ -330,21 +334,31 @@ def main():
                 f"Actual: <b>{escape(actual_raw)}</b> | "
                 f"Fcst: {escape(forecast_raw)} | "
                 f"Prev: {escape(previous_raw)} "
-                f"(Impact: {impact_badge(impact_raw)})\n"
+                f"(Impact: {impact_badge(impact_raw)}) {arrow}\n"
                 f"   ↳ {escape(pdf_note)}  <i>{_verdict(sig)} {_arrow(sig)}</i>"
             )
         else:
-            line = f"• {tstr} <b>{escape(cur)}</b> {escape(title_raw)}"
-            if forecast_raw: line += f" (Fcst: {escape(forecast_raw)})"
-            if impact_raw:   line += f" — {impact_badge(impact_raw)}"
+            # budoucí událost – přidej info, jak číst směr po zveřejnění
+            hint = {
+                "inflation": "Nad fcst = 🟢 (jestřábí), pod fcst = 🔴",
+                "jobs":      "Nižší nezam. / vyšší NFP vs. fcst = 🟢, slabší = 🔴",
+                "gdp":       "Nad fcst = 🟢, pod fcst = 🔴",
+                "retail":    "Nad fcst = 🟢, pod fcst = 🔴",
+                "pmi":       "PMI >50 býčí; pod 50 medvědí",
+                "rates":     "Jestřábí = 🟢, holubičí = 🔴",
+            }.get(typ, "Směr dle překvapení vs. fcst")
+            line = (
+                f"• {tstr} <b>{escape(cur)}</b> {escape(title_raw)}"
+                + (f" (Fcst: {escape(forecast_raw)})" if forecast_raw else "")
+                + (f" — {impact_badge(impact_raw)} ⚪️" if impact_raw else " — ⚪️")
+                + f"\n   ↳ {hint}"
+            )
             upcoming.append(line)
 
     # zpráva
-    header = "🔎 <b>Fundament souhrn ({}{})</b>".format(
-        "/".join(sorted(target))[:15], "…" if len(target)>3 else ""
-    )
+    header = "🔎 <b>Fundament souhrn ({})</b>".format("/".join(sorted(target)))
 
-    order_hint = ["EUR","USD","JPY","GBP","CAD","AUD","NZD","CHF","CNY","JPY"]
+    order_hint = ["EUR","USD","JPY","GBP","CAD","AUD","NZD","CHF","CNY"]
     ordered = [c for c in order_hint if c in scores] + [c for c in scores.keys() if c not in order_hint]
     score_line = "📈 <b>Směrové skóre (měny)</b> — " + " | ".join(_fmt_score_one(c, scores.get(c, 0.0)) for c in ordered)
     score_hint = _score_comment(scores)
@@ -367,15 +381,13 @@ def main():
 
     if published:
         lines.append("\n📢 <b>Zveřejněno</b>")
-        lines.extend(published[:25])
-        if len(published) > 25:
-            lines.append(f"… a dalších {len(published) - 25}")
+        # VŠECHNY události (bez omezení):
+        lines.extend(published)
 
     if upcoming:
         lines.append("\n⏳ <b>V kalendáři (čeká)</b>")
-        lines.extend(upcoming[:25])
-        if len(upcoming) > 25:
-            lines.append(f"… a dalších {len(upcoming) - 25}")
+        # VŠECHNY budoucí události (bez omezení):
+        lines.extend(upcoming)
 
     if not published and not upcoming:
         lines.append("\n⚠️ Ve feedu nebyly nalezeny žádné položky.")
