@@ -186,21 +186,51 @@ def pairs_to_currencies(pairs_list):
     return cur
 
 def send_telegram(text: str):
+    """Pošli text do Telegramu. Pokud je delší než limit, rozešli ho na části."""
     if not BOT_TOKEN or not CHAT_ID:
         print("DEBUG: TELEGRAM env missing; skip send.")
         return
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": str(CHAT_ID),
-        "text": text,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": "true",
-    }
-    try:
-        r = requests.post(url, data=payload, timeout=25)
-        print("Telegram HTTP:", r.status_code, r.text[:200])
-    except Exception as e:
-        print("Telegram exception:", e)
+
+    # Telegram má tvrdý limit 4096 znaků včetně HTML tagů.
+    # Necháme si bezpečnou rezervu kvůli HTML a prefixům dílů.
+    MAX = 3800
+
+    def _send(part_text: str, prefix: str = ""):
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": str(CHAT_ID),
+            "text": (prefix + part_text),
+            "parse_mode": "HTML",
+            "disable_web_page_preview": "true",
+        }
+        try:
+            r = requests.post(url, data=payload, timeout=25)
+            print("Telegram HTTP:", r.status_code, r.text[:200])
+        except Exception as e:
+            print("Telegram exception:", e)
+
+    # Rozsekáme po řádcích, ať netrháme HTML tagy uprostřed
+    lines = text.splitlines()
+    parts = []
+    buf = ""
+
+    for ln in lines:
+        # +1 za odřádkování
+        if len(buf) + len(ln) + 1 > MAX:
+            parts.append(buf)
+            buf = ln
+        else:
+            buf = (buf + "\n" + ln) if buf else ln
+    if buf:
+        parts.append(buf)
+
+    # Pošli sekvenčně, přidej prefix (1/N)
+    total = len(parts)
+    for i, part in enumerate(parts, 1):
+        prefix = f"({i}/{total}) " if total > 1 else ""
+        _send(part, prefix=prefix)
+        # malá pauza kvůli rate-limitům
+        time.sleep(0.5)
 
 def fetch_json_from_hosts(path: str):
     last_err = None
