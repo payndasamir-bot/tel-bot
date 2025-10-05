@@ -222,14 +222,19 @@ def _fmt_score_one(cur: str, val: float) -> str:
     return f"{cur}: +0.0 ⚪️→"
 
 def _score_comment(scores: dict[str, float]) -> str:
+    if not scores:
+        return "Bez dat."
     parts = []
-    for c, v in scores.items():
-        if v > 0:   parts.append(f"{c} posiluje")
-        elif v < 0: parts.append(f"{c} oslabuje")
-        else:       parts.append(f"{c} neutrální")
-    main = " | ".join(parts) if parts else "Bez dat."
-    strongest_cur, strongest_val = max(scores.items(), key=lambda kv: abs(kv[1])) if scores else ("—",0.0)
-    if abs(stro ngest_val) == 0:
+    for cur, val in scores.items():
+        if val > 0:
+            parts.append(f"{cur} posiluje")
+        elif val < 0:
+            parts.append(f"{cur} oslabuje")
+        else:
+            parts.append(f"{cur} neutrální")
+    main = " | ".join(parts)
+    strongest_cur, strongest_val = max(scores.items(), key=lambda kv: abs(kv[1]))
+    if abs(strongest_val) == 0:
         detail = "Zatím bez zveřejněných hodnot; čeká se na data."
     else:
         detail = f"Nejsilnější signál: {strongest_cur} ({strongest_val:+.1f})."
