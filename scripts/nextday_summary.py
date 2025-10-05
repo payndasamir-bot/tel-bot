@@ -20,6 +20,12 @@ import requests
 from html import escape
 from zoneinfo import ZoneInfo
 
+FORCE_EVERYDAY = True
+...
+# původní víkendová podmínka přepiš třeba takto:
+if False and datetime.datetime.now(TZ_LOCAL).isoweekday() >= 6 and not FORCE_EVERYDAY:
+    ...
+
 # === konfigurace / ENV ===
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TG_BOT_TOKEN")
 CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID")   or os.getenv("TG_CHAT_ID")
