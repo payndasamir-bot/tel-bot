@@ -32,6 +32,30 @@ HEADERS = {
 }
 
 # ============ Pomocné funkce ============
+def impact_badge(impact_raw: str) -> str:
+    """Hezký štítek pro Impact."""
+    s = (impact_raw or "").strip().lower()
+    if "high" in s:
+        return "🔴 High"
+    if "med" in s:  # Medium
+        return "🟠 Medium"
+    if "low" in s:
+        return "🟢 Low"
+    return "⚪︎"
+
+def _arrow(sig: int) -> str:
+    return "🟢↑" if sig > 0 else ("🔴↓" if sig < 0 else "⚪️→")
+
+def _verdict(sig: int) -> str:
+    return "Bullish" if sig > 0 else ("Bearish" if sig < 0 else "Neutral")
+
+def fmt_pair_score(pair: str, val: int) -> str:
+    if val > 0:
+        return f"{pair}: +{val} 🟢↑"
+    if val < 0:
+        return f"{pair}: {val} 🔴↓"
+    return f"{pair}: +0 ⚪️→"
+
 def _to_float(x: str | float | int) -> float | None:
     """'3.4', '3,4', '3.4%', '65K', '0.2B' -> float | None"""
     if x is None:
@@ -51,7 +75,7 @@ def _to_float(x: str | float | int) -> float | None:
             v = float(base)
         except:
             return None
-        mults = {"K":1e3, "M":1e6, "B":1e9, "T":1e12}
+        mults = {"K": 1e3, "M": 1e6, "B": 1e9, "T": 1e12}
         return v * mults[suf.upper()]
     try:
         return float(s)
@@ -245,6 +269,10 @@ def main():
     # skóre pro měny (jen co jsou v target)
     scores = {cur: 0 for cur in sorted(target)}
 
+    # skóre pro páry (podle vstupu --pairs, např. EURUSD, USDJPY)
+    pair_list   = [p.upper().strip() for p in pairs if len(p.strip()) == 6]
+    pair_scores = {p: 0 for p in pair_list}
+
     published: list[str] = []
     upcoming:  list[str] = []
 
@@ -270,40 +298,64 @@ def main():
         has_actual = actual_raw not in {"", "-", "—", "N/A", "na", "NaN"}
 
         if has_actual:
-            # zveřejněné položky
+            # signál pro měnu (±1) a váha dle impactu
+            sig      = eval_signal(title_raw, actual_raw, forecast_raw)   # -1 / 0 / +1
+            weight   = _impact_weight(impact_raw)                         # 1 / 2
+            cur_gain = sig * weight
+            scores[cur] = scores.get(cur, 0) + cur_gain
+
+            # promítnout do všech vybraných párů (Base ↑ => pár ↑, Quote ↑ => pár ↓)
+            for pr in pair_list:
+                base, quote = pr[:3], pr[3:]
+                if cur == base:
+                    pair_scores[pr] += cur_gain
+                elif cur == quote:
+                    pair_scores[pr] -= cur_gain
+
+            # řádek do zveřejněných včetně Impact + verdiktu
             published.append(
                 "• "
                 f"{tstr} <b>{escape(cur)}</b> {escape(title_raw)} — "
                 f"Actual: <b>{escape(actual_raw)}</b> | "
                 f"Fcst: {escape(forecast_raw)} | "
                 f"Prev: {escape(previous_raw)} "
-                f"(Impact: {escape(impact_raw)})"
+                f"(Impact: {impact_badge(impact_raw)}) "
+                f"<i>{_verdict(sig)} {_arrow(sig)}</i>"
             )
-            # skóre (signál * váha dopadu)
-            sig    = eval_signal(title_raw, actual_raw, forecast_raw)   # -1 / 0 / +1
-            weight = _impact_weight(impact_raw)                         # 1 / 2
-            scores[cur] = scores.get(cur, 0) + sig * weight
         else:
-            # ještě nepřišlo – zobraz čas a forecast
+            # ještě nepřišlo – zobraz čas + forecast (+ impact)
             line = f"• {tstr} <b>{escape(cur)}</b> {escape(title_raw)}"
             if forecast_raw:
                 line += f" (Fcst: {escape(forecast_raw)})"
+            if impact_raw:
+                line += f" — {impact_badge(impact_raw)}"
             upcoming.append(line)
 
     # ---- zpráva ----
     header = "🔎 <b>Fundament souhrn (EUR/USD/JPY)</b>"
 
-    # řádek se skóre + krátký koment
+    # řádek se skóre měn + krátký koment
     ordered = ["EUR", "USD", "JPY"] + [c for c in sorted(scores.keys()) if c not in {"EUR","USD","JPY"}]
-    score_line = "📈 <b>Směrové skóre</b> — " + " | ".join(_fmt_score_one(c, scores.get(c, 0)) for c in ordered if c in scores)
+    score_line = "📈 <b>Směrové skóre (měny)</b> — " + " | ".join(
+        _fmt_score_one(c, scores.get(c, 0)) for c in ordered if c in scores
+    )
     score_hint = _score_comment(scores)
+
+    # řádek se skóre pro páry (pokud jsou nějaké)
+    pair_line = ""
+    if pair_scores:
+        pairs_pretty = " | ".join(fmt_pair_score(p, v) for p, v in pair_scores.items())
+        pair_line = "💱 <b>Skóre párů</b> — " + pairs_pretty
 
     meta = [
         f"Sloučený feed items: {len(feed_merged)}",
         f"Relevantních (EUR/USD/JPY): {len(relevant)} | Zveřejněno: {len(published)} | Čeká: {len(upcoming)}",
     ]
 
-    lines: list[str] = [header, score_line, score_hint] + meta
+    lines: list[str] = [header, score_line, score_hint]
+    if pair_line:
+        lines.append(pair_line)
+    lines += meta
 
     if published:
         lines.append("\n📢 <b>Zveřejněno</b>")
