@@ -1,11 +1,10 @@
 name: Daily next-day summary (22:00 CET)
 
 on:
-  # Spouštět KAŽDÝ den (i o víkendu)
-  # 20:00 UTC ≈ 22:00 CET/CEST
+  # Spouštět KAŽDÝ den (i o víkendu). 20:00 UTC ≈ 22:00 CET/CEST
   schedule:
     - cron: '0 20 * * *'
-  # Ručně spustitelné s volitelným vstupem páru
+  # Ruční spuštění s volitelným vstupem párů
   workflow_dispatch:
     inputs:
       pairs:
@@ -31,13 +30,23 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install deps
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install requests
+          fi
 
-      # ŽÁDNÝ "Skip on weekend" – poběží i v sobotu/neděli
-      - name: Run daily summary (fundament)
+      # Debug krok (nepovinný, můžeš smazat po ověření)
+      - name: Debug list files
+        run: |
+          pwd
+          ls -la
+          find . -maxdepth 2 -type f | sort
+
+      - name: Run daily summary (nextday_summary.py)
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -45,4 +54,4 @@ jobs:
           PAIRS: ${{ inputs.pairs || 'EURUSD,USDJPY' }}
         run: |
           echo "Cílové páry: $PAIRS"
-          python scripts/fundament_summary.py --pairs "$PAIRS"
+          python scripts/nextday_summary.py --pairs "$PAIRS"
