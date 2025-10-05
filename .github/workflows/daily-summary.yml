@@ -1,27 +1,26 @@
 name: Daily next-day summary (22:00 CET)
 
 on:
+  # Spouštět KAŽDÝ den (i o víkendu)
+  # 20:00 UTC ≈ 22:00 CET/CEST
   schedule:
-    - cron: "0 20 * * *"   # 22:00 CET (20:00 UTC)
+    - cron: '0 20 * * *'
+  # Ručně spustitelné s volitelným vstupem páru
   workflow_dispatch:
     inputs:
       pairs:
-        description: "Seznam párů oddělený čárkou"
+        description: 'FX páry (bez lomítka, čárkou oddělené)'
         required: false
-        default: "EURUSD,USDJPY"
+        default: 'EURUSD,USDJPY'
 
 jobs:
   run-summary:
     runs-on: ubuntu-latest
-    env:
-      PAIRS: ${{ inputs.pairs != '' && inputs.pairs || 'EURUSD,USDJPY' }}
-      TZ: Europe/Prague
-      # pro Python skripty
-      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-      # pro notify.py (stejné hodnoty, jiné názvy proměnných)
-      TG_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      TG_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+    timeout-minutes: 15
+
+    concurrency:
+      group: daily-summary
+      cancel-in-progress: true
 
     steps:
       - name: Checkout
@@ -30,37 +29,20 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
-      - name: Install deps (optional)
-        if: hashFiles('requirements.txt') != ''
-        run: pip install -r requirements.txt
-
-      - name: Skip on weekend
+      - name: Install deps
         run: |
-          dow=$(date +%u)
-          if [ "$dow" -ge 6 ]; then
-            echo "Víkend – workflow se přeskočí."
-            python scripts/notify.py "ℹ️ Daily summary přeskočeno (víkend). Páry: <code>$PAIRS</code>"
-            exit 0
-          fi
+          python -m pip install --upgrade pip
+          pip install requests
 
-      - name: Run daily summary
-        id: runpy
-        shell: bash
+      # ŽÁDNÝ "Skip on weekend" – poběží i v sobotu/neděli
+      - name: Run daily summary (fundament)
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TZ: Europe/Prague
+          PAIRS: ${{ inputs.pairs || 'EURUSD,USDJPY' }}
         run: |
           echo "Cílové páry: $PAIRS"
-          set +e
-          python scripts/nextday_summary.py --pairs "$PAIRS"
-          code=$?
-          echo "exit_code=$code" >> "$GITHUB_OUTPUT"   # <<< DŮLEŽITÉ
-          if [ $code -eq 2 ]; then
-            echo "Žádná data – beru jako OK."
-            exit 0
-          elif [ $code -ne 0 ]; then
-            echo "Skript spadl s kódem: $code"
-            exit $code
-          fi
-          echo "Hotovo."
-
-     
+          python scripts/fundament_summary.py --pairs "$PAIRS"
