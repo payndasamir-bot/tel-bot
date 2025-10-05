@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 import os, sys, json, argparse, datetime, time
 import requests
+import re
 from html import escape
 from zoneinfo import ZoneInfo
-FORCE_PROBE = False  # <- DOČASNĚ: po ověření přepni na False nebo řádek smaž
+
+FORCE_PROBE = False  # můžeš přepnout na True pro testovací výpis surových dat
 
 # ============ Konfigurace ============
-
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TG_BOT_TOKEN")
 CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID")   or os.getenv("TG_CHAT_ID")
 
 TZ_NAME  = os.getenv("TZ", "Europe/Prague")
 TZ_LOCAL = ZoneInfo(TZ_NAME)
 
-# dva feedy (tento a minulý týden); zkoušíme 2 hosty kvůli blokaci/ výpadkům
 FEED_PATHS = [
     "ff_calendar_thisweek.json",
     "ff_calendar_lastweek.json",
@@ -33,17 +33,83 @@ HEADERS = {
 
 # ============ Pomocné funkce ============
 
+def _to_float(x: str | float | int) -> float | None:
+    if x is None:
+        return None
+    if isinstance(x, (int, float)):
+        return float(x)
+    s = str(x).strip()
+    if not s or s in {"—", "-", "N/A", "na", "NaN"}:
+        return None
+    s = s.replace(" ", "").replace(",", ".")
+    if s.endswith("%"):
+        s = s[:-1]
+    m = re.match(r"^([-+]?\d*\.?\d*)([KMBT])$", s, flags=re.I)
+    if m:
+        base, suf = m.groups()
+        try:
+            v = float(base)
+        except:
+            return None
+        mults = {"K":1e3, "M":1e6, "B":1e9, "T":1e12}
+        return v * mults[suf.upper()]
+    try:
+        return float(s)
+    except:
+        return None
+
+def _event_type(title: str) -> str:
+    t = title.lower()
+    if "cpi" in t or "inflation" in t: return "inflation"
+    if "rate" in t or "interest" in t: return "rates"
+    if "unemployment" in t or "jobless" in t or "claims" in t: return "jobs"
+    if "gdp" in t: return "gdp"
+    if "retail sales" in t: return "retail"
+    if "pmi" in t or "ism" in t: return "pmi"
+    if "industrial production" in t or "factory" in t or "orders" in t: return "production"
+    if "trade balance" in t or "current account" in t: return "trade"
+    if "sentiment" in t or "confidence" in t or "expectations" in t or "optimism" in t: return "sentiment"
+    if "housing" in t or "building permits" in t or "pending home" in t: return "housing"
+    return "other"
+
+_HIGHER_IS_BETTER = {
+    "inflation": True,
+    "rates": True,
+    "jobs": False,
+    "gdp": True,
+    "retail": True,
+    "pmi": True,
+    "production": True,
+    "trade": True,
+    "sentiment": True,
+    "housing": True,
+    "other": None,
+}
+
+def eval_signal(title_raw: str, actual_raw: str, forecast_raw: str) -> int:
+    a = _to_float(actual_raw)
+    f = _to_float(forecast_raw)
+    if a is None or f is None:
+        return 0
+    typ = _event_type(title_raw)
+    hib = _HIGHER_IS_BETTER.get(typ, None)
+    if hib is None:
+        return 0
+    if hib:
+        return +1 if a > f else -1
+    else:
+        return +1 if a < f else -1
+
 def to_local(ts: int) -> datetime.datetime:
-    """UTC timestamp -> lokalizovaný datetime."""
     return datetime.datetime.fromtimestamp(int(ts), datetime.timezone.utc).astimezone(TZ_LOCAL)
 
 def pairs_to_currencies(pairs_list):
-    """EURUSD,USDJPY -> {'EUR','USD','JPY'}"""
     cur = set()
     for p in pairs_list:
         p = p.upper().strip()
         if len(p) == 6:
-            cur.add(p[:3]); cur.add(p[3:])
+            cur.add(p[:3])
+            cur.add(p[3:])
     return cur
 
 def send_telegram(text: str):
@@ -64,18 +130,12 @@ def send_telegram(text: str):
         print("Telegram exception:", e)
 
 def fetch_json_from_hosts(path: str):
-    """Zkusí stáhnout JSON z více hostů (s retries) a vrátí list nebo []"""
     last_err = None
     for host in FEED_HOSTS:
         url = host.rstrip("/") + "/" + path.lstrip("/")
         for attempt in range(3):
             try:
-                r = requests.get(
-                    url,
-                    headers=HEADERS,
-                    params={"_": int(time.time())},  # cache-buster
-                    timeout=20,
-                )
+                r = requests.get(url, headers=HEADERS, params={"_": int(time.time())}, timeout=20)
                 if r.status_code >= 400:
                     raise requests.HTTPError(f"{r.status_code} {r.reason}")
                 data = r.json()
@@ -94,17 +154,9 @@ def fetch_json_from_hosts(path: str):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--pairs", type=str, default=os.getenv("PAIRS", "EURUSD,USDJPY")
-    )
-    parser.add_argument(
-        "--from", dest="from_date", type=str, default=None,
-        help="Začátek období (YYYY-MM-DD)"
-    )
-    parser.add_argument(
-        "--to", dest="to_date", type=str, default=None,
-        help="Konec období včetně (YYYY-MM-DD)"
-    )
+    parser.add_argument("--pairs", type=str, default=os.getenv("PAIRS", "EURUSD,USDJPY"))
+    parser.add_argument("--from", dest="from_date", type=str, default=None)
+    parser.add_argument("--to", dest="to_date", type=str, default=None)
     args = parser.parse_args()
 
     pairs = [p.strip() for p in args.pairs.split(",") if p.strip()]
@@ -112,11 +164,9 @@ def main():
         print("No pairs provided.")
         sys.exit(2)
 
-    target = pairs_to_currencies(pairs)  # např. {'EUR','USD','JPY'}
+    target = pairs_to_currencies(pairs)
     print("Cílové měny:", sorted(target))
 
-     # --- časové okno ---
-       # --- časové okno ---
     def _parse_date(s: str) -> datetime.date:
         return datetime.date.fromisoformat(s)
 
@@ -131,156 +181,112 @@ def main():
         to_date   = _parse_date(args.to_date)
         if from_date > to_date:
             from_date, to_date = to_date, from_date
-        horizon_end = datetime.datetime.combine(
-            to_date, datetime.time(23, 59), tzinfo=TZ_LOCAL
-        )
+        horizon_end = datetime.datetime.combine(to_date, datetime.time(23, 59), tzinfo=TZ_LOCAL)
     else:
         from_date   = today_local - datetime.timedelta(days=LOOKBACK_DAYS)
         to_date     = today_local
         horizon_end = now_local + datetime.timedelta(hours=AHEAD_HOURS)
-        
-    # ---- načtení a sloučení feedů ----
+
+    # ---- načtení feedů ----
     feed_merged = []
     for path in FEED_PATHS:
         data = fetch_json_from_hosts(path)
         if isinstance(data, list):
             feed_merged.extend(data)
-
     print("Feed items merged:", len(feed_merged))
-        # === PROBE mód: pošli syrové ukázky bez filtrů, ať vidíme, že data tečou ===
+
     if FORCE_PROBE:
         countries = {}
         examples = []
         for ev in feed_merged:
             cur = (ev.get("country") or "").upper()
             countries[cur] = countries.get(cur, 0) + 1
-
             ts = ev.get("timestamp")
             if ts:
                 dt = to_local(ts)
-                time_str = dt.strftime("%Y-%m-%d %H:%M")
+                tstr = dt.strftime("%Y-%m-%d %H:%M")
             else:
-                time_str = "—"
-
-            if len(examples) < 10:  # pošli prvních 10 pro ochutnávku
+                tstr = "—"
+            if len(examples) < 10:
                 examples.append(
-                    f"• {time_str} <b>{escape(cur)}</b> "
-                    f"{escape((ev.get('title') or '').strip())} | "
+                    f"• {tstr} <b>{escape(cur)}</b> {escape((ev.get('title') or '').strip())} | "
                     f"act=<b>{escape(str(ev.get('actual') or '').strip())}</b> "
                     f"fcst={escape(str(ev.get('forecast') or '').strip())}"
                 )
-
-        # top 10 zemí podle počtu
-        top_countries = sorted(countries.items(), key=lambda x: x[1], reverse=True)[:10]
-        top_str = ", ".join([f"{c}:{n}" for c, n in top_countries]) if top_countries else "—"
-
-        msg = [
-            "🧪 <b>PROBE: syrový výpis z feedu</b>",
-            f"Feedů sloučeno: <code>{len(feed_merged)}</code>",
-            f"Počty podle zemí (Top10): {top_str}",
-        ]
-        if examples:
-            msg.append("\n📋 <b>Příklady položek</b>")
-            msg.extend(examples)
-        else:
-            msg.append("\n⚠️ Žádné položky k ukázce.")
-
+        top = sorted(countries.items(), key=lambda x: x[1], reverse=True)[:10]
+        top_str = ", ".join([f"{c}:{n}" for c, n in top]) if top else "—"
+        msg = ["🧪 <b>PROBE: syrový výpis</b>", f"Feedů sloučeno: {len(feed_merged)}", f"Top země: {top_str}"]
+        msg += examples
         send_telegram("\n".join(msg))
         print("PROBE done, exiting early.")
         return
-   
-    
 
-       # ---- zpracování (bez časového filtru) ----
-    from html import escape as _esc
+    # ---- zpracování ----
+    relevant = [ev for ev in feed_merged if (ev.get("country") or "").upper() in target]
 
-    def _line(ev, show_time=True):
-        cur = (ev.get("country") or "").upper()
-        ts  = ev.get("timestamp")
-        if ts:
-            dt = to_local(ts)
-            tstr = dt.strftime("%Y-%m-%d %H:%M")
-        else:
-            tstr = "—"
-
-        title    = _esc((ev.get("title") or "").strip())
-        actual   = _esc(str(ev.get("actual") or "").strip())
-        forecast = _esc(str(ev.get("forecast") or "").strip())
-        previous = _esc(str(ev.get("previous") or "").strip())
-        impact   = _esc(str(ev.get("impact") or "").strip())
-        cur_disp = _esc(cur)
-
-        parts = []
-        if show_time:
-            parts.append(f"{tstr}")
-        parts.append(f"<b>{cur_disp}</b> {title}")
-
-        details = []
-        if actual:
-            details.append(f"Actual: <b>{actual}</b>")
-        if forecast:
-            details.append(f"Fcst: {forecast}")
-        if previous:
-            details.append(f"Prev: {previous}")
-        if impact:
-            details.append(f"(Impact: {impact})")
-
-        if details:
-            return "• " + " ".join(parts) + " — " + " | ".join(details)
-        else:
-            return "• " + " ".join(parts)
-
-    # jen události pro zadané měny (EUR/USD/JPY apod.)
-    relevant = []
-    for ev in feed_merged:
-        cur = (ev.get("country") or "").upper()
-        if cur in target:
-            relevant.append(ev)
-
-    # rozdělení: „zveřejněno“ (má actual) vs „ještě nepřišlo“ (actual prázdné)
     published = []
     upcoming  = []
+    signals_sum = {"EUR": 0, "USD": 0, "JPY": 0}
+
     for ev in relevant:
-        has_actual = str(ev.get("actual") or "").strip() not in {"", "-", "—", "N/A", "na", "NaN"}
-        if has_actual:
-            published.append(ev)
+        cur = (ev.get("country") or "").upper()
+        ts = ev.get("timestamp")
+        dt = to_local(ts) if ts else None
+
+        title_raw    = (ev.get("title") or "").strip()
+        actual_raw   = str(ev.get("actual") or "").strip()
+        forecast_raw = str(ev.get("forecast") or "").strip()
+        previous_raw = str(ev.get("previous") or "").strip()
+        impact_raw   = str(ev.get("impact") or "").strip()
+
+        sig = eval_signal(title_raw, actual_raw, forecast_raw)
+        arrow = "🟢" if sig > 0 else ("🔴" if sig < 0 else "⚪️")
+        verdict = "Bullish" if sig > 0 else ("Bearish" if sig < 0 else "Neutral")
+
+        if cur in signals_sum:
+            signals_sum[cur] += sig
+
+        if actual_raw:
+            published.append(
+                f"{arrow} {dt.strftime('%Y-%m-%d %H:%M') if dt else '—'} <b>{cur}</b> {escape(title_raw)} — "
+                f"Actual: <b>{escape(actual_raw)}</b> | Fcst: {escape(forecast_raw)} | Prev: {escape(previous_raw)} "
+                f"(Impact: {escape(impact_raw)}) → <i>{verdict} {cur}</i>"
+            )
         else:
-            upcoming.append(ev)
+            upcoming.append(
+                f"⚪️ {dt.strftime('%Y-%m-%d %H:%M') if dt else '—'} <b>{cur}</b> {escape(title_raw)} "
+                f"(Fcst: {escape(forecast_raw)})"
+            )
 
-    # seřaď (volitelné): zveřejněné a „čeká“ podle času (když ho mají)
-    def _key(ev):
-        try:
-            return int(ev.get("timestamp") or 0)
-        except Exception:
-            return 0
-
-    published.sort(key=_key, reverse=True)   # nejnovější nahoře
-    upcoming.sort(key=_key)                  # nejdřív nejbližší
-
-    # zpráva
+    # ---- zpráva ----
     header = "🔎 <b>Fundament souhrn (EUR/USD/JPY)</b>"
+    score_line = (
+        f"📈 <b>Směrové skóre</b> — "
+        f"EUR: <code>{signals_sum['EUR']:+d}</code> | "
+        f"USD: <code>{signals_sum['USD']:+d}</code> | "
+        f"JPY: <code>{signals_sum['JPY']:+d}</code>"
+    )
     meta = [
         f"Sloučený feed items: {len(feed_merged)}",
-        f"Relevantních (EUR/USD/JPY): {len(relevant)} | "
-        f"Zveřejněno: {len(published)} | Bez 'actual' (ještě nepřišlo): {len(upcoming)}",
+        f"Relevantních (EUR/USD/JPY): {len(relevant)} | Zveřejněno: {len(published)} | Čeká: {len(upcoming)}",
     ]
 
-    lines = [header] + meta
+    lines = [header, score_line] + meta
 
     if published:
         lines.append("\n📢 <b>Zveřejněno</b>")
-        lines.extend([_line(ev) for ev in published[:25]])
+        lines.extend(published[:25])
         if len(published) > 25:
             lines.append(f"… a dalších {len(published) - 25}")
 
     if upcoming:
-        lines.append("\n⏳ <b>V kalendáři (bez 'actual')</b>")
-        lines.extend([_line(ev) for ev in upcoming[:25]])
+        lines.append("\n⏳ <b>V kalendáři (čeká)</b>")
+        lines.extend(upcoming[:25])
         if len(upcoming) > 25:
             lines.append(f"… a dalších {len(upcoming) - 25}")
 
     if not published and not upcoming:
-        lines.append("\n⚠️ Ve feedu pro zadané měny nebyly nalezeny žádné položky.")
+        lines.append("\n⚠️ Ve feedu nebyly nalezeny žádné položky.")
 
     send_telegram("\n".join(lines))
     print("Hotovo.")
@@ -288,4 +294,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
