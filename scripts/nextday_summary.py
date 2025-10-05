@@ -191,116 +191,96 @@ def main():
    
     
 
-    # ---- zpracování ----
-    occurred = []            # co proběhlo v lookback okně
-    upcoming = []            # co přijde do 48 h
-    relevant_in_window = 0   # počet uvnitř okna pro EUR/USD/JPY
+       # ---- zpracování (bez časového filtru) ----
+    from html import escape as _esc
 
-    # debug počitadla
-    dbg_total = 0
-    dbg_cur = 0
-    dbg_window = 0
-    dbg_examples = []
-
-    for ev in feed_merged:
-        dbg_total += 1
-
+    def _line(ev, show_time=True):
         cur = (ev.get("country") or "").upper()
-        if cur not in target:
-            continue
-        dbg_cur += 1
+        ts  = ev.get("timestamp")
+        if ts:
+            dt = to_local(ts)
+            tstr = dt.strftime("%Y-%m-%d %H:%M")
+        else:
+            tstr = "—"
 
-        ts = ev.get("timestamp")
-        if not ts:
-            continue
+        title    = _esc((ev.get("title") or "").strip())
+        actual   = _esc(str(ev.get("actual") or "").strip())
+        forecast = _esc(str(ev.get("forecast") or "").strip())
+        previous = _esc(str(ev.get("previous") or "").strip())
+        impact   = _esc(str(ev.get("impact") or "").strip())
+        cur_disp = _esc(cur)
 
-        dt = to_local(ts)  # lokální čas události
+        parts = []
+        if show_time:
+            parts.append(f"{tstr}")
+        parts.append(f"<b>{cur_disp}</b> {title}")
 
-        # ukázkové položky, které spadly do týdenního okna (pro DEBUG)
-        if from_date <= dt.date() <= today_local:
-            dbg_window += 1
-            if len(dbg_examples) < 5:
-                dbg_examples.append(
-                    f"{dt.strftime('%Y-%m-%d %H:%M')} {cur} {(ev.get('title') or '').strip()} "
-                    f"| act='{str(ev.get('actual') or '').strip()}' fc='{str(ev.get('forecast') or '').strip()}'"
-                )
+        details = []
+        if actual:
+            details.append(f"Actual: <b>{actual}</b>")
+        if forecast:
+            details.append(f"Fcst: {forecast}")
+        if previous:
+            details.append(f"Prev: {previous}")
+        if impact:
+            details.append(f"(Impact: {impact})")
 
-        # --- datové sloupce ---
-        title_raw    = (ev.get("title") or "").strip()
-        actual_raw   = str(ev.get("actual") or "").strip()
-        forecast_raw = str(ev.get("forecast") or "").strip()
-        previous_raw = str(ev.get("previous") or "").strip()
-        impact_raw   = str(ev.get("impact") or "").strip()
+        if details:
+            return "• " + " ".join(parts) + " — " + " | ".join(details)
+        else:
+            return "• " + " ".join(parts)
 
-        title    = escape(title_raw)
-        actual   = escape(actual_raw)
-        forecast = escape(forecast_raw)
-        previous = escape(previous_raw)
-        impact   = escape(impact_raw)
-        cur_disp = escape(cur)
+    # jen události pro zadané měny (EUR/USD/JPY apod.)
+    relevant = []
+    for ev in feed_merged:
+        cur = (ev.get("country") or "").upper()
+        if cur in target:
+            relevant.append(ev)
 
-        # 1) Události, které už PROBĚHLY v lookback okně
-        if from_date <= dt.date() <= today_local and dt <= now_local:
-            relevant_in_window += 1
-            line = f"• {dt.strftime('%Y-%m-%d %H:%M')} <b>{cur_disp}</b> {title}"
-            detail = []
-            if actual:   detail.append(f"Actual: <b>{actual}</b>")
-            if forecast: detail.append(f"Fcst: {forecast}")
-            if previous: detail.append(f"Prev: {previous}")
-            if impact:   detail.append(f"(Impact: {impact})")
-            if detail:
-                line += " — " + " | ".join(detail)
-            occurred.append(line)
+    # rozdělení: „zveřejněno“ (má actual) vs „ještě nepřišlo“ (actual prázdné)
+    published = []
+    upcoming  = []
+    for ev in relevant:
+        has_actual = str(ev.get("actual") or "").strip() not in {"", "-", "—", "N/A", "na", "NaN"}
+        if has_actual:
+            published.append(ev)
+        else:
+            upcoming.append(ev)
 
-        # 2) Události, které teprve přijdou v nejbližších 48 h
-        elif now_local < dt <= horizon_end:
-            line = f"• {dt.strftime('%Y-%m-%d %H:%M')} <b>{cur_disp}</b> {title}"
-            if forecast:
-                line += f" (Fcst: {forecast})"
-            upcoming.append(line)
+    # seřaď (volitelné): zveřejněné a „čeká“ podle času (když ho mají)
+    def _key(ev):
+        try:
+            return int(ev.get("timestamp") or 0)
+        except Exception:
+            return 0
 
-    # ---- DEBUG výpis do logu Actions ----
-    print(
-        "DEBUG:",
-        f"total={dbg_total}",
-        f"in_currency={dbg_cur}",
-        f"in_window={dbg_window}",
-        f"from={from_date} to={today_local}",
-        f"now={now_local.strftime('%Y-%m-%d %H:%M')}",
-        sep="\n"
-    )
-    if dbg_examples:
-        print("DEBUG examples (first matches in window):")
-        for ex in dbg_examples:
-            print("  -", ex)
-    else:
-        print("DEBUG examples: none matched the window")
+    published.sort(key=_key, reverse=True)   # nejnovější nahoře
+    upcoming.sort(key=_key)                  # nejdřív nejbližší
 
-    # ---- Sestavení zprávy ----
+    # zpráva
     header = "🔎 <b>Fundament souhrn (EUR/USD/JPY)</b>"
-    meta   = [
-        f"Období: {from_date} → {today_local}",
+    meta = [
         f"Sloučený feed items: {len(feed_merged)}",
-        f"Relevantních v období (EUR/USD/JPY): {relevant_in_window} | "
-        f"Události v období: {len(occurred)} | Nejbližších 48 h: {len(upcoming)}"
+        f"Relevantních (EUR/USD/JPY): {len(relevant)} | "
+        f"Zveřejněno: {len(published)} | Bez 'actual' (ještě nepřišlo): {len(upcoming)}",
     ]
 
     lines = [header] + meta
 
-    if occurred:
-        lines.append("\n📢 <b>Zveřejněno v období</b>")
-        lines.extend(occurred[:25])
-        if len(occurred) > 25:
-            lines.append(f"… a dalších {len(occurred) - 25}")
+    if published:
+        lines.append("\n📢 <b>Zveřejněno</b>")
+        lines.extend([_line(ev) for ev in published[:25]])
+        if len(published) > 25:
+            lines.append(f"… a dalších {len(published) - 25}")
 
     if upcoming:
-        lines.append("\n⏳ <b>Ještě přijde (48 h)</b>")
-        lines.extend(upcoming[:25])
+        lines.append("\n⏳ <b>V kalendáři (bez 'actual')</b>")
+        lines.extend([_line(ev) for ev in upcoming[:25]])
         if len(upcoming) > 25:
             lines.append(f"… a dalších {len(upcoming) - 25}")
 
-    if not occurred and not upcoming:
-        lines.append("\n⚠️ V zadaném okně nebyly nalezeny žádné položky.")
+    if not published and not upcoming:
+        lines.append("\n⚠️ Ve feedu pro zadané měny nebyly nalezeny žádné položky.")
 
     send_telegram("\n".join(lines))
     print("Hotovo.")
