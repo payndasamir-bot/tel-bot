@@ -5,7 +5,7 @@ import re
 from html import escape
 from zoneinfo import ZoneInfo
 
-FORCE_PROBE = False  # můžeš přepnout na True pro testovací výpis surových dat
+FORCE_PROBE = False  # přepni na True, když chceš poslat syrové ukázky z feedu
 
 # ============ Konfigurace ============
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TG_BOT_TOKEN")
@@ -32,8 +32,8 @@ HEADERS = {
 }
 
 # ============ Pomocné funkce ============
-
 def _to_float(x: str | float | int) -> float | None:
+    """'3.4', '3,4', '3.4%', '65K', '0.2B' -> float | None"""
     if x is None:
         return None
     if isinstance(x, (int, float)):
@@ -87,6 +87,7 @@ _HIGHER_IS_BETTER = {
 }
 
 def eval_signal(title_raw: str, actual_raw: str, forecast_raw: str) -> int:
+    """+1 (bull), -1 (bear), 0 (neutrální/nelze) podle actual vs forecast a typu metriky."""
     a = _to_float(actual_raw)
     f = _to_float(forecast_raw)
     if a is None or f is None:
@@ -95,10 +96,35 @@ def eval_signal(title_raw: str, actual_raw: str, forecast_raw: str) -> int:
     hib = _HIGHER_IS_BETTER.get(typ, None)
     if hib is None:
         return 0
-    if hib:
-        return +1 if a > f else -1
+    return (+1 if a > f else -1) if hib else (+1 if a < f else -1)
+
+def _impact_weight(impact_raw: str) -> int:
+    """High = 2, jinak 1 (velmi jednoduché váhování dopadu)."""
+    s = (impact_raw or "").strip().lower()
+    if "high" in s:   return 2
+    if "med"  in s:   return 1
+    if "low"  in s:   return 1
+    return 1
+
+def _fmt_score_one(cur: str, val: int) -> str:
+    if val > 0:  return f"{cur}: +{val} 🟢↑"
+    if val < 0:  return f"{cur}: {val} 🔴↓"
+    return f"{cur}: +0 ⚪️→"
+
+def _score_comment(scores: dict[str, int]) -> str:
+    parts = []
+    for cur, v in scores.items():
+        if v > 0:   parts.append(f"{cur} posiluje")
+        elif v < 0: parts.append(f"{cur} oslabuje")
+        else:       parts.append(f"{cur} neutrální")
+    main = " | ".join(parts)
+    strongest_cur, strongest_val = max(scores.items(), key=lambda kv: abs(kv[1]))
+    if abs(strongest_val) == 0:
+        detail = "Zatím bez zveřejněných hodnot; čeká se na data."
     else:
-        return +1 if a < f else -1
+        dir_word = "bullish" if strongest_val > 0 else "bearish"
+        detail = f"Nejsilnější signál: {strongest_cur} ({'+' if strongest_val > 0 else ''}{strongest_val}, {dir_word})."
+    return f"{main}. {detail}"
 
 def to_local(ts: int) -> datetime.datetime:
     return datetime.datetime.fromtimestamp(int(ts), datetime.timezone.utc).astimezone(TZ_LOCAL)
@@ -108,8 +134,7 @@ def pairs_to_currencies(pairs_list):
     for p in pairs_list:
         p = p.upper().strip()
         if len(p) == 6:
-            cur.add(p[:3])
-            cur.add(p[3:])
+            cur.add(p[:3]); cur.add(p[3:])
     return cur
 
 def send_telegram(text: str):
@@ -139,9 +164,7 @@ def fetch_json_from_hosts(path: str):
                 if r.status_code >= 400:
                     raise requests.HTTPError(f"{r.status_code} {r.reason}")
                 data = r.json()
-                if isinstance(data, list):
-                    return data
-                return []
+                return data if isinstance(data, list) else []
             except Exception as e:
                 last_err = e
                 wait = 1 + attempt
@@ -151,7 +174,6 @@ def fetch_json_from_hosts(path: str):
     return []
 
 # ============ Hlavní logika ============
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--pairs", type=str, default=os.getenv("PAIRS", "EURUSD,USDJPY"))
@@ -161,8 +183,7 @@ def main():
 
     pairs = [p.strip() for p in args.pairs.split(",") if p.strip()]
     if not pairs:
-        print("No pairs provided.")
-        sys.exit(2)
+        print("No pairs provided."); sys.exit(2)
 
     target = pairs_to_currencies(pairs)
     print("Cílové měny:", sorted(target))
@@ -202,11 +223,7 @@ def main():
             cur = (ev.get("country") or "").upper()
             countries[cur] = countries.get(cur, 0) + 1
             ts = ev.get("timestamp")
-            if ts:
-                dt = to_local(ts)
-                tstr = dt.strftime("%Y-%m-%d %H:%M")
-            else:
-                tstr = "—"
+            tstr = to_local(ts).strftime("%Y-%m-%d %H:%M") if ts else "—"
             if len(examples) < 10:
                 examples.append(
                     f"• {tstr} <b>{escape(cur)}</b> {escape((ev.get('title') or '').strip())} | "
@@ -222,56 +239,71 @@ def main():
         return
 
     # ---- zpracování ----
+    # vyber jen události pro cílové měny
     relevant = [ev for ev in feed_merged if (ev.get("country") or "").upper() in target]
 
-    published = []
-    upcoming  = []
-    signals_sum = {"EUR": 0, "USD": 0, "JPY": 0}
+    # skóre pro měny (jen co jsou v target)
+    scores = {cur: 0 for cur in sorted(target)}
+
+    published: list[str] = []
+    upcoming:  list[str] = []
+
+    def _ts_to_str(ts):
+        if ts is None:
+            return "—"
+        try:
+            return to_local(ts).strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            return "—"
 
     for ev in relevant:
-        cur = (ev.get("country") or "").upper()
-        ts = ev.get("timestamp")
-        dt = to_local(ts) if ts else None
+        cur          = (ev.get("country")  or "").upper()
+        ts           = ev.get("timestamp")
+        tstr         = _ts_to_str(ts)
 
-        title_raw    = (ev.get("title") or "").strip()
-        actual_raw   = str(ev.get("actual") or "").strip()
+        title_raw    = (ev.get("title")    or "").strip()
+        actual_raw   = str(ev.get("actual")   or "").strip()
         forecast_raw = str(ev.get("forecast") or "").strip()
         previous_raw = str(ev.get("previous") or "").strip()
-        impact_raw   = str(ev.get("impact") or "").strip()
+        impact_raw   = str(ev.get("impact")   or "").strip()
 
-        sig = eval_signal(title_raw, actual_raw, forecast_raw)
-        arrow = "🟢" if sig > 0 else ("🔴" if sig < 0 else "⚪️")
-        verdict = "Bullish" if sig > 0 else ("Bearish" if sig < 0 else "Neutral")
+        has_actual = actual_raw not in {"", "-", "—", "N/A", "na", "NaN"}
 
-        if cur in signals_sum:
-            signals_sum[cur] += sig
-
-        if actual_raw:
+        if has_actual:
+            # zveřejněné položky
             published.append(
-                f"{arrow} {dt.strftime('%Y-%m-%d %H:%M') if dt else '—'} <b>{cur}</b> {escape(title_raw)} — "
-                f"Actual: <b>{escape(actual_raw)}</b> | Fcst: {escape(forecast_raw)} | Prev: {escape(previous_raw)} "
-                f"(Impact: {escape(impact_raw)}) → <i>{verdict} {cur}</i>"
+                "• "
+                f"{tstr} <b>{escape(cur)}</b> {escape(title_raw)} — "
+                f"Actual: <b>{escape(actual_raw)}</b> | "
+                f"Fcst: {escape(forecast_raw)} | "
+                f"Prev: {escape(previous_raw)} "
+                f"(Impact: {escape(impact_raw)})"
             )
+            # skóre (signál * váha dopadu)
+            sig    = eval_signal(title_raw, actual_raw, forecast_raw)   # -1 / 0 / +1
+            weight = _impact_weight(impact_raw)                         # 1 / 2
+            scores[cur] = scores.get(cur, 0) + sig * weight
         else:
-            upcoming.append(
-                f"⚪️ {dt.strftime('%Y-%m-%d %H:%M') if dt else '—'} <b>{cur}</b> {escape(title_raw)} "
-                f"(Fcst: {escape(forecast_raw)})"
-            )
+            # ještě nepřišlo – zobraz čas a forecast
+            line = f"• {tstr} <b>{escape(cur)}</b> {escape(title_raw)}"
+            if forecast_raw:
+                line += f" (Fcst: {escape(forecast_raw)})"
+            upcoming.append(line)
 
     # ---- zpráva ----
     header = "🔎 <b>Fundament souhrn (EUR/USD/JPY)</b>"
-    score_line = (
-        f"📈 <b>Směrové skóre</b> — "
-        f"EUR: <code>{signals_sum['EUR']:+d}</code> | "
-        f"USD: <code>{signals_sum['USD']:+d}</code> | "
-        f"JPY: <code>{signals_sum['JPY']:+d}</code>"
-    )
+
+    # řádek se skóre + krátký koment
+    ordered = ["EUR", "USD", "JPY"] + [c for c in sorted(scores.keys()) if c not in {"EUR","USD","JPY"}]
+    score_line = "📈 <b>Směrové skóre</b> — " + " | ".join(_fmt_score_one(c, scores.get(c, 0)) for c in ordered if c in scores)
+    score_hint = _score_comment(scores)
+
     meta = [
         f"Sloučený feed items: {len(feed_merged)}",
         f"Relevantních (EUR/USD/JPY): {len(relevant)} | Zveřejněno: {len(published)} | Čeká: {len(upcoming)}",
     ]
 
-    lines = [header, score_line] + meta
+    lines: list[str] = [header, score_line, score_hint] + meta
 
     if published:
         lines.append("\n📢 <b>Zveřejněno</b>")
