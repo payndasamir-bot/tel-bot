@@ -1,10 +1,10 @@
-name: Daily next-day summary (22:00 CET)
+name: Daily next-day summary (22:00 local)
 
 on:
-  # Spouštět KAŽDÝ den (i o víkendu). 20:00 UTC ≈ 22:00 CET/CEST
+  # 20:00 UTC ≈ 22:00 CEST (léto), 21:00 UTC ≈ 22:00 CET (zima)
   schedule:
-    - cron: '0 20 * * *'
-  # Ruční spuštění s volitelným vstupem párů
+    - cron: '0 20 * * *'   # léto
+    - cron: '0 21 * * *'   # zima
   workflow_dispatch:
     inputs:
       pairs:
@@ -16,7 +16,6 @@ jobs:
   run-summary:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-
     concurrency:
       group: daily-summary
       cancel-in-progress: true
@@ -38,13 +37,6 @@ jobs:
           else
             pip install requests
           fi
-
-      # Debug krok (nepovinný, můžeš smazat po ověření)
-      - name: Debug list files
-        run: |
-          pwd
-          ls -la
-          find . -maxdepth 2 -type f | sort
 
       - name: Run daily summary (nextday_summary.py)
         env:
