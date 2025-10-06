@@ -1,32 +1,32 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Fundament souhrn pro vybrané páry (např. EURUSD, USDJPY) z FF JSON feedu
-+ KOMPLETNÍ výpis všech událostí (nezkracuje)
-+ barvy podle směru (🟢 bullish, 🔴 bearish, ⚪️ neutral)
-+ komentáře "podle PDF" (inflace, HDP, PMI, trh práce, retail, sazby…)
-+ váha podle impactu i stáří (recency)
-+ výstup do Telegramu
+Fundament souhrn pro vybrané páry (např. EURUSD, USDJPY) z FF JSON feedu.
+- Bere publikované události z posledních X dní (default 7) a udělá "kurátorovaný výběr".
+- Barvy podle směru (🟢 bullish, 🔴 bearish, ⚪️ neutral).
+- Komentáře "podle PDF" (inflace, HDP, PMI, trh práce, retail, sazby…).
+- Váha podle impactu i stáří (recency).
+- Výstup do Telegramu (bez ohledu na víkend – posílá KAŽDÝ den).
 
 ENV:
   TELEGRAM_BOT_TOKEN / TG_BOT_TOKEN
   TELEGRAM_CHAT_ID   / TG_CHAT_ID
   TZ (default Europe/Prague)
   PAIRS (např. "EURUSD,USDJPY")
+
+  WINDOW_DAYS       (default 7)  – kolik dní zpět hodnotit
+  LOOKAHEAD_DAYS    (default 7)  – informativní horizont "čeká"
+  MIN_IMPACT        (default medium) – 'low' | 'medium' | 'high'
+  MIN_SURPRISE_PCT  (default 0.10)   – 10% překvapení proti forecastu
+  TOP_N             (default 12)     – kolik highlightů poslat
 """
 
-import os, sys, json, argparse, time, datetime, re
+import os, sys, argparse, time, datetime, re
 import requests
 from html import escape
 from zoneinfo import ZoneInfo
 
-FORCE_EVERYDAY = True
-...
-# původní víkendová podmínka přepiš třeba takto:
-if False and datetime.datetime.now(TZ_LOCAL).isoweekday() >= 6 and not FORCE_EVERYDAY:
-    ...
-
-# === konfigurace / ENV ===
+# === KONFIGURACE / ENV =======================================================
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TG_BOT_TOKEN")
 CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID")   or os.getenv("TG_CHAT_ID")
 
@@ -46,7 +46,14 @@ HEADERS = {
     "Cache-Control": "no-cache",
 }
 
-# ============ UI ============
+# --- kurátorování / okna / thr ---
+WINDOW_DAYS       = int(os.getenv("WINDOW_DAYS", "7"))
+LOOKAHEAD_DAYS    = int(os.getenv("LOOKAHEAD_DAYS", "7"))
+MIN_IMPACT        = os.getenv("MIN_IMPACT", "medium").lower()
+MIN_SURPRISE_PCT  = float(os.getenv("MIN_SURPRISE_PCT", "0.10"))
+TOP_N_HIGHLIGHTS  = int(os.getenv("TOP_N", "12"))
+
+# === UI ======================================================================
 def impact_badge(impact_raw: str) -> str:
     s = (impact_raw or "").strip().lower()
     if "high" in s:   return "🔴 High"
@@ -66,7 +73,7 @@ def fmt_pair_score(pair: str, val: float) -> str:
     if val < 0:  return f"{pair}: {v} 🔴↓"
     return f"{pair}: +0.0 ⚪️→"
 
-# ============ parsování čísel a typů ============
+# === parsování čísel a typů ==================================================
 def _to_float(x) -> float | None:
     if x is None: return None
     if isinstance(x, (int, float)): return float(x)
@@ -80,7 +87,7 @@ def _to_float(x) -> float | None:
         try: v = float(base)
         except: return None
         mult = {"K":1e3,"M":1e6,"B":1e9,"T":1e12}[suf.upper()]
-        return v*mult
+        return v * mult
     try:
         return float(s)
     except:
@@ -102,12 +109,12 @@ def _event_type(title: str) -> str:
 
 # "z PDF": vyšší je pro měnu lepší?
 _HIGHER_IS_BETTER = {
-    "inflation": True,      # CPI/PCE vyšší = jestřábí (měna ↑, XAU ↓)
-    "rates":     True,      # jestřábí guidance (zjednodušujeme na vyšší) = měna ↑
-    "jobs":      False,     # nižší nezaměstnanost / vyšší NFP = měna ↑
-    "gdp":       True,      # vyšší růst = měna ↑
-    "retail":    True,      # silnější spotřeba = měna ↑
-    "pmi":       True,      # 50+ expanze býčí (zjednod.: vyšší = lepší)
+    "inflation": True,   # vyšší CPI/PCE = jestřábí (měna ↑, XAU ↓)
+    "rates":     True,   # jestřábí guidance = měna ↑
+    "jobs":      False,  # nižší nezaměstnanost / vyšší NFP = měna ↑
+    "gdp":       True,
+    "retail":    True,
+    "pmi":       True,   # 50+ expanze býčí
     "production":True,
     "trade":     True,
     "sentiment": True,
@@ -132,12 +139,35 @@ def _recency_weight(ts) -> float:
     try:
         age_h = (datetime.datetime.now(datetime.timezone.utc)
                  - datetime.datetime.fromtimestamp(int(ts), datetime.timezone.utc)
-                 ).total_seconds()/3600.0
-    except: return 1.0
+                 ).total_seconds() / 3600.0
+    except: 
+        return 1.0
     if age_h <= 6:   return 1.6
     if age_h <= 24:  return 1.25
     if age_h <= 72:  return 1.0
     return 0.75
+
+# --- překlad impactu + překvapení ---
+CORE_TYPES = {"inflation", "rates", "jobs", "gdp", "pmi", "retail"}
+
+def impact_level(s: str) -> int:
+    s = (s or "").lower()
+    if "high" in s:   return 2
+    if "med"  in s:   return 1
+    if "low"  in s:   return 0
+    return 0
+
+def min_impact_level() -> int:
+    m = MIN_IMPACT
+    if m.startswith("h"): return 2
+    if m.startswith("m"): return 1
+    return 0
+
+def surprise_ratio(actual_raw, forecast_raw) -> float:
+    a = _to_float(actual_raw); f = _to_float(forecast_raw)
+    if a is None or f is None or f == 0:
+        return 0.0
+    return abs(a - f) / abs(f)
 
 # --- komentář "podle PDF" ---
 def _comment_for_event(title: str, typ: str, actual, forecast, cur: str) -> str:
@@ -158,22 +188,22 @@ def _comment_for_event(title: str, typ: str, actual, forecast, cur: str) -> str:
         }
         return base.get(typ, "Vliv dle překvapení vs. forecast.")
     if typ == "inflation":
-        return f"Inflace nad oček. → jestřábí: {cur} ↑, XAU ↓" if a>f else f"Inflace pod oček. → {cur} ↓, XAU ↑"
+        return f"Inflace nad oček. → jestřábí: {cur} ↑, XAU ↓" if a > f else f"Inflace pod oček. → {cur} ↓, XAU ↑"
     if typ == "gdp":
-        return f"HDP nad oček. → {cur} ↑, akcie ↑" if a>f else f"HDP pod oček. → {cur} ↓"
+        return f"HDP nad oček. → {cur} ↑, akcie ↑" if a > f else f"HDP pod oček. → {cur} ↓"
     if typ == "jobs":
-        return f"Trh práce silnější vs. fcst → {cur} ↑" if a<f else f"Trh práce slabší → {cur} ↓"
+        return f"Trh práce silnější vs. fcst → {cur} ↑" if a < f else f"Trh práce slabší → {cur} ↓"
     if typ == "retail":
-        return f"Spotřeba nad oček. → {cur} ↑, akcie ↑" if a>f else f"Spotřeba pod oček. → {cur} ↓"
+        return f"Spotřeba nad oček. → {cur} ↑, akcie ↑" if a > f else f"Spotřeba pod oček. → {cur} ↓"
     if typ == "pmi":
-        if a>=50 and (f is None or a>=f): return f"PMI expanze → {cur} ↑"
-        if a<50  and (f is None or a<=f): return f"PMI kontrakce → {cur} ↓"
+        if a >= 50 and (f is None or a >= f): return f"PMI expanze → {cur} ↑"
+        if a < 50  and (f is None or a <= f): return f"PMI kontrakce → {cur} ↓"
         return "PMI vs. fcst smíšené → vliv mírný"
     if typ == "rates":
         return f"Sazby/řeč: jestřábí = {cur} ↑, holubičí = {cur} ↓"
     return "Překvapení vs. forecast určuje směr."
 
-# ============ pomocné ============
+# === pomocné ================================================================
 def to_local(ts: int) -> datetime.datetime:
     return datetime.datetime.fromtimestamp(int(ts), datetime.timezone.utc).astimezone(TZ_LOCAL)
 
@@ -181,7 +211,7 @@ def pairs_to_currencies(pairs_list):
     cur = set()
     for p in pairs_list:
         p = p.upper().strip()
-        if len(p)==6:
+        if len(p) == 6:
             cur.add(p[:3]); cur.add(p[3:])
     return cur
 
@@ -191,10 +221,7 @@ def send_telegram(text: str):
         print("DEBUG: TELEGRAM env missing; skip send.")
         return
 
-    # Telegram má tvrdý limit 4096 znaků včetně HTML tagů.
-    # Necháme si bezpečnou rezervu kvůli HTML a prefixům dílů.
-    MAX = 3800
-
+    MAX = 3800  # rezerva pod 4096 (kvůli HTML)
     def _send(part_text: str, prefix: str = ""):
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
         payload = {
@@ -209,28 +236,20 @@ def send_telegram(text: str):
         except Exception as e:
             print("Telegram exception:", e)
 
-    # Rozsekáme po řádcích, ať netrháme HTML tagy uprostřed
     lines = text.splitlines()
-    parts = []
-    buf = ""
-
+    parts, buf = [], ""
     for ln in lines:
-        # +1 za odřádkování
         if len(buf) + len(ln) + 1 > MAX:
-            parts.append(buf)
-            buf = ln
+            parts.append(buf); buf = ln
         else:
             buf = (buf + "\n" + ln) if buf else ln
-    if buf:
-        parts.append(buf)
+    if buf: parts.append(buf)
 
-    # Pošli sekvenčně, přidej prefix (1/N)
     total = len(parts)
     for i, part in enumerate(parts, 1):
         prefix = f"({i}/{total}) " if total > 1 else ""
         _send(part, prefix=prefix)
-        # malá pauza kvůli rate-limitům
-        time.sleep(0.5)
+        time.sleep(0.4)
 
 def fetch_json_from_hosts(path: str):
     last_err = None
@@ -251,7 +270,7 @@ def fetch_json_from_hosts(path: str):
     print(f"WARN: failed all hosts for {path}: {last_err}")
     return []
 
-# ============ main ============
+# === main ===================================================================
 def _fmt_score_one(cur: str, val: float) -> str:
     if val > 0:   return f"{cur}: +{val:.1f} 🟢↑"
     if val < 0:   return f"{cur}: {val:.1f} 🔴↓"
@@ -262,18 +281,14 @@ def _score_comment(scores: dict[str, float]) -> str:
         return "Bez dat."
     parts = []
     for cur, val in scores.items():
-        if val > 0:
-            parts.append(f"{cur} posiluje")
-        elif val < 0:
-            parts.append(f"{cur} oslabuje")
-        else:
-            parts.append(f"{cur} neutrální")
+        if val > 0:   parts.append(f"{cur} posiluje")
+        elif val < 0: parts.append(f"{cur} oslabuje")
+        else:         parts.append(f"{cur} neutrální")
     main = " | ".join(parts)
     strongest_cur, strongest_val = max(scores.items(), key=lambda kv: abs(kv[1]))
-    if abs(strongest_val) == 0:
-        detail = "Zatím bez zveřejněných hodnot; čeká se na data."
-    else:
-        detail = f"Nejsilnější signál: {strongest_cur} ({strongest_val:+.1f})."
+    detail = ("Zatím bez zveřejněných hodnot; čeká se na data."
+              if abs(strongest_val) == 0 else
+              f"Nejsilnější signál: {strongest_cur} ({strongest_val:+.1f}).")
     return f"{main}. {detail}"
 
 def _pair_bias_sentence(pr: str, val: float) -> str:
@@ -285,22 +300,23 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--pairs", type=str, default=PAIRS_ENV)             # "EURUSD,USDJPY"
     parser.add_argument("--from", dest="from_date", type=str, default=None) # volitelný filtr data
-    parser.add_argument("--to", dest="to_date", type=str, default=None)
+    parser.add_argument("--to",   dest="to_date",   type=str, default=None)
     args = parser.parse_args()
 
     pairs = [p.strip().upper() for p in args.pairs.split(",") if p.strip()]
     if not pairs:
         print("No pairs provided."); sys.exit(2)
 
-    target = pairs_to_currencies(pairs)
-    pair_list   = [p for p in pairs if len(p)==6]
+    target   = pairs_to_currencies(pairs)
+    pair_list = [p for p in pairs if len(p) == 6]
     print("Cílové měny:", sorted(target))
 
     def _parse_date(s: str) -> datetime.date:
         return datetime.date.fromisoformat(s)
 
-    LOOKBACK_DAYS = 7
-    AHEAD_HOURS   = 48
+    # okna pro výběr
+    LOOKBACK_DAYS = WINDOW_DAYS
+    AHEAD_HOURS   = 24 * LOOKAHEAD_DAYS
 
     now_local   = datetime.datetime.now(TZ_LOCAL)
     today_local = now_local.date()
@@ -316,22 +332,22 @@ def main():
         to_date     = today_local
         horizon_end = now_local + datetime.timedelta(hours=AHEAD_HOURS)
 
-    # načti feedy
+    # načtení feedů
     feed_merged = []
     for path in FEED_PATHS:
         feed_merged.extend(fetch_json_from_hosts(path))
     print("Feed items merged:", len(feed_merged))
 
-    # vyber jen target měny
+    # výběr jen cílových měn
     relevant = [ev for ev in feed_merged if (ev.get("country") or "").upper() in target]
 
-    # skóre měn (float kvůli vahám)
-    scores: dict[str, float] = {cur: 0.0 for cur in sorted(target)}
-    # skóre párů
-    pair_scores: dict[str, float] = {p: 0.0 for p in pair_list}
+    # skóre měn/párů
+    scores: dict[str, float]     = {cur: 0.0 for cur in sorted(target)}
+    pair_scores: dict[str, float]= {p: 0.0 for p in pair_list}
 
     published: list[str] = []
     upcoming:  list[str] = []
+    highlights: list[tuple[float, str]] = []  # (síla, řádek)
 
     def _ts_to_str(ts):
         if ts is None: return "—"
@@ -353,6 +369,17 @@ def main():
         has_actual = actual_raw not in {"", "-", "—", "N/A", "na", "NaN"}
 
         if has_actual:
+            # ---- kurátorovací filtr (jen relevantní/velké věci) ----
+            lvl   = impact_level(impact_raw)
+            surpr = surprise_ratio(actual_raw, forecast_raw)
+            if not (
+                (lvl >= min_impact_level() and (typ in CORE_TYPES))  # core téma a min. impact
+                or (lvl == 2)                                        # cokoliv s High impact
+                or (surpr >= MIN_SURPRISE_PCT)                       # nebo velké překvapení
+            ):
+                continue
+            # --------------------------------------------------------
+
             # směrový signál + váhy
             sig    = eval_signal(title_raw, actual_raw, forecast_raw)   # -1/0/+1
             w_imp  = _impact_weight(impact_raw)
@@ -362,14 +389,13 @@ def main():
 
             for pr in pair_list:
                 base, quote = pr[:3], pr[3:]
-                if cur == base:  pair_scores[pr] += cur_gain
-                elif cur == quote: pair_scores[pr] -= cur_gain
+                if cur == base:      pair_scores[pr] += cur_gain
+                elif cur == quote:   pair_scores[pr] -= cur_gain
 
-            # komentář podle PDF
             pdf_note = _comment_for_event(title_raw, typ, actual_raw, forecast_raw, cur)
             arrow = "🟢" if sig > 0 else ("🔴" if sig < 0 else "⚪️")
 
-            published.append(
+            line = (
                 "• "
                 f"{tstr} <b>{escape(cur)}</b> {escape(title_raw)} — "
                 f"Actual: <b>{escape(actual_raw)}</b> | "
@@ -378,8 +404,15 @@ def main():
                 f"(Impact: {impact_badge(impact_raw)}) {arrow}\n"
                 f"   ↳ {escape(pdf_note)}  <i>{_verdict(sig)} {_arrow(sig)}</i>"
             )
+            published.append(line)
+            highlights.append((abs(cur_gain), line))
+
         else:
-            # budoucí událost – přidej info, jak číst směr po zveřejnění
+            # budoucí události – také probereme (jen core + min. impact)
+            lvl = impact_level(impact_raw)
+            if not (lvl >= min_impact_level() and typ in CORE_TYPES):
+                continue
+
             hint = {
                 "inflation": "Nad fcst = 🟢 (jestřábí), pod fcst = 🔴",
                 "jobs":      "Nižší nezam. / vyšší NFP vs. fcst = 🟢, slabší = 🔴",
@@ -417,17 +450,17 @@ def main():
     meta = [
         f"Sloučený feed items: {len(feed_merged)}",
         f"Relevantních ({'/'.join(sorted(target))}): {len(relevant)} | Zveřejněno: {len(published)} | Čeká: {len(upcoming)}",
+        f"Okno: posledních {WINDOW_DAYS} dní | Výhled do {LOOKAHEAD_DAYS} dnů",
     ]
     lines += meta
 
     if published:
-        lines.append("\n📢 <b>Zveřejněno</b>")
-        # VŠECHNY události (bez omezení):
-        lines.extend(published)
+        lines.append(f"\n📢 <b>Kurátorovaný výběr (posledních {WINDOW_DAYS} dní)</b>")
+        top = sorted(highlights, key=lambda x: x[0], reverse=True)[:TOP_N_HIGHLIGHTS]
+        lines += [row for _, row in top]
 
     if upcoming:
-        lines.append("\n⏳ <b>V kalendáři (čeká)</b>")
-        # VŠECHNY budoucí události (bez omezení):
+        lines.append("\n⏳ <b>V kalendáři (čeká – core & min. impact)</b>")
         lines.extend(upcoming)
 
     if not published and not upcoming:
