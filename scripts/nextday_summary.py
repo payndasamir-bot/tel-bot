@@ -460,8 +460,10 @@ def main():
         lines += [row for _, row in top]
 
     if upcoming:
-        lines.append("\n⏳ <b>V kalendáři (čeká – core & min. impact)</b>")
-        lines.extend(upcoming)
+    lines.append("\n⏳ <b>V kalendáři (čeká – s datem & časem)</b>")
+    # seřadíme podle času
+    upcoming_sorted = sorted(upcoming, key=lambda x: re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}", x).group(0) if re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}", x) else "9999-99-99 99:99")
+    lines.extend(upcoming_sorted)
 
     if not published and not upcoming:
         lines.append("\n⚠️ Ve feedu nebyly nalezeny žádné položky.")
