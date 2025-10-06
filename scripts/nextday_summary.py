@@ -140,7 +140,7 @@ def _recency_weight(ts) -> float:
         age_h = (datetime.datetime.now(datetime.timezone.utc)
                  - datetime.datetime.fromtimestamp(int(ts), datetime.timezone.utc)
                  ).total_seconds() / 3600.0
-    except: 
+    except:
         return 1.0
     if age_h <= 6:   return 1.6
     if age_h <= 24:  return 1.25
@@ -207,6 +207,12 @@ def _comment_for_event(title: str, typ: str, actual, forecast, cur: str) -> str:
 def to_local(ts: int) -> datetime.datetime:
     return datetime.datetime.fromtimestamp(int(ts), datetime.timezone.utc).astimezone(TZ_LOCAL)
 
+WEEKDAY = ["Po", "Út", "St", "Čt", "Pá", "So", "Ne"]
+def fmt_dt(ts: int) -> str:
+    """Lidský formát – Po 07.10 14:30 v lokální TZ."""
+    dt = to_local(ts)
+    return f"{WEEKDAY[dt.weekday()]} {dt:%d.%m %H:%M}"
+
 def pairs_to_currencies(pairs_list):
     cur = set()
     for p in pairs_list:
@@ -270,6 +276,25 @@ def fetch_json_from_hosts(path: str):
     print(f"WARN: failed all hosts for {path}: {last_err}")
     return []
 
+# --- týdenní narativ podle typů ---
+def make_week_narrative(type_counts: dict[str, int], upcoming_total: int) -> str:
+    if upcoming_total == 0:
+        return "📝 <b>Týdenní souhrn (výhled)</b>\n• Tento týden nejsou v kalendáři žádné zásadní události."
+    parts = []
+    if type_counts.get("inflation"): parts.append("• Inflace (CPI/PCE): vyšší než odhad ⇒ jestřábí (měny ↑, XAU ↓).")
+    if type_counts.get("rates"):     parts.append("• Sazby / centrální banky: jestřábí rétorika podporuje měny; holubičí je tlumí.")
+    if type_counts.get("jobs"):      parts.append("• Trh práce: nižší nezaměstnanost / silnější NFP bývá pro měny býčí.")
+    if type_counts.get("pmi"):       parts.append("• PMI/ISM: nad 50 = expanze (býčí), pod 50 = kontrakce (medvědí).")
+    if type_counts.get("retail"):    parts.append("• Maloobchodní tržby: silnější spotřeba je pro měny/akcie býčí.")
+    if type_counts.get("gdp"):       parts.append("• HDP: vyšší růst obvykle podporuje měny i riziková aktiva.")
+    if type_counts.get("production"):parts.append("• Průmysl/objednávky: lepší čísla = býčí tón.")
+    if type_counts.get("trade"):     parts.append("• Bilance/běžný účet: zlepšení býčí, zhoršení medvědí.")
+    if type_counts.get("sentiment"): parts.append("• Sentiment/konf.: vyšší důvěra = větší risk-on apetit.")
+    if type_counts.get("housing"):   parts.append("• Bydlení: vyšší povolenky/prodeje bývají býčí.")
+    if not parts:
+        parts.append("• Vliv bude dán překvapením oproti odhadu (Actual vs. Forecast).")
+    return "📝 <b>Týdenní souhrn (výhled)</b>\n" + "\n".join(parts)
+
 # === main ===================================================================
 def _fmt_score_one(cur: str, val: float) -> str:
     if val > 0:   return f"{cur}: +{val:.1f} 🟢↑"
@@ -307,7 +332,7 @@ def main():
     if not pairs:
         print("No pairs provided."); sys.exit(2)
 
-    target   = pairs_to_currencies(pairs)
+    target    = pairs_to_currencies(pairs)
     pair_list = [p for p in pairs if len(p) == 6]
     print("Cílové měny:", sorted(target))
 
@@ -342,22 +367,18 @@ def main():
     relevant = [ev for ev in feed_merged if (ev.get("country") or "").upper() in target]
 
     # skóre měn/párů
-    scores: dict[str, float]     = {cur: 0.0 for cur in sorted(target)}
-    pair_scores: dict[str, float]= {p: 0.0 for p in pair_list}
+    scores: dict[str, float]      = {cur: 0.0 for cur in sorted(target)}
+    pair_scores: dict[str, float] = {p: 0.0 for p in pair_list}
 
     published: list[str] = []
-    upcoming:  list[str] = []
-    highlights: list[tuple[float, str]] = []  # (síla, řádek)
-
-    def _ts_to_str(ts):
-        if ts is None: return "—"
-        try: return to_local(ts).strftime("%Y-%m-%d %H:%M")
-        except: return "—"
+    upcoming:  list[tuple[int | None, str]] = []  # (ts, řádek)
+    highlights: list[tuple[float, str]] = []      # (síla, řádek)
+    upcoming_type_counts: dict[str, int] = {}
 
     for ev in relevant:
         cur          = (ev.get("country")  or "").upper()
         ts           = ev.get("timestamp")
-        tstr         = _ts_to_str(ts)
+        tstr         = fmt_dt(ts) if ts else "—"
 
         title_raw    = (ev.get("title")    or "").strip()
         actual_raw   = str(ev.get("actual")   or "").strip()
@@ -408,7 +429,7 @@ def main():
             highlights.append((abs(cur_gain), line))
 
         else:
-            # budoucí události – také probereme (jen core + min. impact)
+            # budoucí události – jen core + min. impact
             lvl = impact_level(impact_raw)
             if not (lvl >= min_impact_level() and typ in CORE_TYPES):
                 continue
@@ -421,13 +442,15 @@ def main():
                 "pmi":       "PMI >50 býčí; pod 50 medvědí",
                 "rates":     "Jestřábí = 🟢, holubičí = 🔴",
             }.get(typ, "Směr dle překvapení vs. fcst")
+
             line = (
-                f"• {tstr} <b>{escape(cur)}</b> {escape(title_raw)}"
+                f"• {tstr} — <b>{escape(cur)}</b> {escape(title_raw)}"
                 + (f" (Fcst: {escape(forecast_raw)})" if forecast_raw else "")
                 + (f" — {impact_badge(impact_raw)} ⚪️" if impact_raw else " — ⚪️")
                 + f"\n   ↳ {hint}"
             )
-            upcoming.append(line)
+            upcoming.append((ts, line))
+            upcoming_type_counts[typ] = upcoming_type_counts.get(typ, 0) + 1
 
     # zpráva
     header = "🔎 <b>Fundament souhrn ({})</b>".format("/".join(sorted(target)))
@@ -437,7 +460,10 @@ def main():
     score_line = "📈 <b>Směrové skóre (měny)</b> — " + " | ".join(_fmt_score_one(c, scores.get(c, 0.0)) for c in ordered)
     score_hint = _score_comment(scores)
 
-    lines: list[str] = [header, score_line, score_hint]
+    # týdenní textový výhled
+    week_narrative = make_week_narrative(upcoming_type_counts, len(upcoming))
+
+    lines: list[str] = [header, score_line, score_hint, week_narrative]
 
     if pair_scores:
         pairs_pretty = " | ".join(fmt_pair_score(p, v) for p, v in pair_scores.items())
@@ -461,8 +487,8 @@ def main():
 
     if upcoming:
         lines.append("\n⏳ <b>V kalendáři (čeká – s datem & časem)</b>")
-        # seřadíme podle času
-        upcoming_sorted = sorted(upcoming, key=lambda x: re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}", x).group(0) if re.search(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}", x) else "9999-99-99 99:99")
+        # seřadíme podle timestampu (None až nakonec)
+        upcoming_sorted = [ln for _, ln in sorted(upcoming, key=lambda x: (x[0] is None, x[0]))]
         lines.extend(upcoming_sorted)
 
     if not published and not upcoming:
